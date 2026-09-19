@@ -1,18 +1,18 @@
 import {app,BrowserWindow,ipcMain,shell} from 'electron';
 import {fileURLToPath} from 'node:url';
 import {mkdirSync} from 'node:fs';
-import {WindowsDesktop} from '../windows-desktop/controller.mjs';
+import {NativeLab} from './controller.mjs';
 
-app.setName('Jeff — управление Windows');
-const profile=fileURLToPath(new URL(process.argv.includes('--windows-smoke')?'../../work/windows-desktop/ui-smoke-profile/':'../../work/desktop-lab/electron-profile/',import.meta.url));
+app.setName('Jeff Windows Lab');
+const profile=fileURLToPath(new URL('../../work/desktop-lab/fixture-profile/',import.meta.url));
 mkdirSync(profile,{recursive:true});
 app.setPath('userData',profile);
 let window;
-export const lab=new WindowsDesktop(value=>{if(window&&!window.isDestroyed())window.webContents.send('lab:progress',value);});
+export const lab=new NativeLab(value=>{if(window&&!window.isDestroyed())window.webContents.send('lab:progress',value);});
 if(!app.requestSingleInstanceLock()){app.quit();}else{
   app.on('second-instance',()=>{window?.show();window?.focus();});
   app.whenReady().then(async()=>{
-    window=new BrowserWindow({width:1100,height:840,minWidth:760,minHeight:620,title:'Jeff — управление Windows',
+    window=new BrowserWindow({width:1000,height:790,minWidth:760,minHeight:620,title:'Jeff Windows Lab',
       webPreferences:{preload:fileURLToPath(new URL('./preload.cjs',import.meta.url)),contextIsolation:true,nodeIntegration:false,sandbox:true}});
     window.removeMenu();
     window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
@@ -24,7 +24,7 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
         try{return await handler(payload);}catch(error){return {error:/^[A-Z_]{1,60}$/.test(error.code)?error.code:'LAB_ERROR',running:lab.running};}
       });
     }
-    await window.loadFile(fileURLToPath(new URL('./lab.html',import.meta.url)));
+    await window.loadFile(fileURLToPath(new URL('./fixture/lab.html',import.meta.url)));
   });
   app.on('window-all-closed',()=>app.quit());
   app.on('before-quit',()=>lab.dispose());

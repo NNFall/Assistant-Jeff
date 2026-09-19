@@ -4,31 +4,32 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
-  <title>Jeff Windows Lab</title>
+  <title>Jeff — управление Windows</title>
   <link rel="stylesheet" href="lab.css">
   <script src="lab.js" defer></script>
 </head>
 <body>
   <main>
-    <header><div><p class="eyebrow">ТЕСТОВЫЙ СТЕНД</p><h1>Jeff Windows Lab</h1></div><span id="status" class="badge" role="status">Проверка состояния…</span></header>
-    <p class="intro">Jev выбирает действие по наблюдению Windows UI Automation. Белое окно — наша песочница с настоящими Windows-контролами: оно нужно на время прогона и автоматически открывается или восстанавливается по кнопке «Выполнить». Стенд не управляет Яндексом и вашими открытыми приложениями.</p>
+    <header><div><p class="eyebrow">РЕАЛЬНЫЙ КОМПЬЮТЕР</p><h1>Jeff — управление Windows</h1></div><span id="status" class="badge" role="status">Проверка состояния…</span></header>
+    <p class="intro">Напишите задачу для компьютера. Jeff запускает поддерживаемые программы из меню «Пуск», получает доступные окна и элементы Windows, выбирает действие и проверяет результат после каждого шага. Кнопка «Стоп» прерывает выполнение; запросы, решения и результаты сохраняются в журнале.</p>
     <section class="controls" aria-labelledby="scenario-title">
-      <h2 id="scenario-title">Команда и ожидаемый результат</h2>
-      <div class="scenario-row"><label for="scenario">Пример команды</label><select id="scenario"><option value="custom">Своя команда</option><option value="tabs">Первая вкладка ВК</option><option value="music_on">Включить музыку</option><option value="music_off">Выключить музыку</option><option value="language">Переключить тестовый язык</option></select><span class="threshold">Порог действия: P ≥ 0,80 · confidence ≥ 0,80</span></div>
+      <h2 id="scenario-title">Задача для компьютера</h2>
+      <div class="scenario-row"><label for="scenario">Пример команды</label><select id="scenario"><option value="custom">Своя команда</option><option value="chrome">Свернуть Google Chrome</option><option value="music">Яндекс Музыка на весь экран</option><option value="steam">Открыть Steam</option><option value="tabs">Найти первую вкладку ВК</option></select><span class="threshold">Порог действия: P ≥ 0,80 · confidence ≥ 0,80</span></div>
       <p id="goal" class="goal"></p>
-      <label for="command">Проверяемая команда для Jev</label>
-      <textarea id="command" rows="2" maxlength="1024" spellcheck="false" aria-describedby="command-help" placeholder="Например: открой первую вкладку ВКонтакте"></textarea>
-      <div class="field-meta"><span id="command-help">Напишите свою команду или отредактируйте пример. Модель работает только с контролами песочницы; язык здесь тестовый, системная раскладка не меняется.</span><span id="counter">0 / 1024</span></div>
-      <div class="actions"><button id="start" type="button">Открыть тестовое окно</button><button id="run" type="button" class="primary">Выполнить</button><button id="stop" type="button" disabled>Стоп</button><button id="refresh" type="button">Обновить наблюдение</button><button id="history" type="button">Журнал</button></div>
-      <p id="activity" role="status" aria-live="polite">Введите команду и нажмите «Выполнить» — песочница откроется автоматически.</p>
+      <label for="command">Что нужно сделать?</label>
+      <textarea id="command" rows="3" maxlength="1024" spellcheck="false" aria-describedby="command-help privacy-help" placeholder="Сверни Google Chrome&#10;Разверни Яндекс Музыку на весь экран.&#10;Найди первую вкладку ВКонтакте в Яндекс Браузере"></textarea>
+      <div class="field-meta"><span id="command-help">Для запуска нужен ярлык в меню «Пуск», ведущий к локальному EXE без параметров. Уже открытые окна тоже доступны. Управление внутри приложения зависит от элементов, которые оно предоставляет через Windows UI Automation.</span><span id="counter">0 / 1024</span></div>
+      <div class="actions"><button id="run" type="button" class="primary">Выполнить</button><button id="stop" type="button" disabled>Стоп</button><button id="start" type="button">Обновить окна</button><button id="refresh" type="button" hidden>Обновить наблюдение</button><button id="history" type="button">Журнал</button></div>
+      <p id="activity" role="status" aria-live="polite">Введите задачу и нажмите «Выполнить».</p>
+      <p id="privacy-help" class="privacy">Во время выполнения задача, названия доступных программ, структура окон и названия элементов передаются модели Jev. Фонового отправления наблюдений нет. Изображение экрана модель не анализирует.</p>
       <p id="error" class="error" role="alert" hidden></p>
     </section>
     <div class="workspace">
-      <section aria-labelledby="observation-title"><div class="section-heading"><h2 id="observation-title">Наблюдение UIA</h2><span id="snapshot-version" class="muted">Нет снимка</span></div><p id="summary" class="muted">Элементы появятся после открытия тестового окна.</p><ul id="elements" class="elements"></ul><details><summary>Факты и метаданные</summary><pre id="facts">Нет данных</pre></details></section>
-      <section aria-labelledby="result-title"><h2 id="result-title">Проверка результата</h2><p id="verification" class="verification" role="status">Ещё не выполнялась</p><p id="result-meta" class="muted"></p><p id="run-meta" class="muted"></p><h3>План и цель</h3><p id="goal-status" class="muted">План ещё не получен.</p><pre id="plan">Нет данных</pre><h3>Ход выполнения</h3><div id="decisions" class="decisions"><p class="muted">Здесь будут фактические шаги и ответы модели.</p></div><details><summary>Полный отчёт и запросы модели</summary><pre id="trace">Нет данных</pre></details></section>
+      <section aria-labelledby="observation-title"><div class="section-heading"><h2 id="observation-title">Окна и доступные элементы</h2><span id="snapshot-version" class="muted">Нет снимка</span></div><p id="summary" class="muted">Нажмите «Обновить окна», чтобы получить текущее состояние компьютера.</p><ul id="windows" class="window-list" aria-label="Окна приложений"></ul><h3>Элементы управления</h3><ul id="elements" class="elements"></ul><details><summary>Факты и метаданные</summary><pre id="facts">Нет данных</pre></details></section>
+      <section aria-labelledby="result-title"><h2 id="result-title">Проверка результата</h2><p id="verification" class="verification" role="status">Ещё не выполнялась</p><p id="result-meta" class="muted"></p><p id="run-meta" class="muted"></p><h3>Цель</h3><p id="goal-status" class="muted">Задача ещё не выполнялась.</p><pre id="plan">Ваша команда появится здесь после запуска.</pre><h3>Ход выполнения</h3><div id="decisions" class="decisions"><p class="muted">Здесь будут фактические шаги и ответы модели.</p></div><details><summary>Полный отчёт и запросы модели</summary><pre id="trace">Нет данных</pre></details></section>
     </div>
     <section id="history-panel" class="history-panel" hidden aria-labelledby="history-title"><div class="section-heading"><h2 id="history-title">Последние 20 сессий</h2><button id="open-logs" type="button">Открыть папку журналов</button></div><p id="history-status" class="muted"></p><ul id="history-list" class="history-list"></ul><details id="history-report"><summary>Выбранная сессия: полный JSON</summary><pre id="history-json">Выберите запись выше.</pre></details></section>
-    <footer>Это отдельный стенд: установленный Assistant Jeff не меняется. В сценарии воспроизведения проверяется состояние контрола; звук не проигрывается.</footer>
+    <footer>Действия выполняются в реальных приложениях. Если нужный элемент недоступен или уверенность ниже порога, Jeff останавливается и записывает причину. Возможности ограничены доступными инструментами и данными Windows UI Automation.</footer>
   </main>
 </body>
 </html>

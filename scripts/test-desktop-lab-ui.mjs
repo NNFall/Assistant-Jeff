@@ -17,7 +17,7 @@ let exitCode=0;
 let lab;
 async function run() {
 try {
-  ({lab}=await import('./desktop-lab/main.mjs'));
+  ({lab}=await import('./desktop-lab/fixture-main.mjs'));
   await app.whenReady();
   await until(()=>BrowserWindow.getAllWindows().length===1);
   const window=BrowserWindow.getAllWindows()[0];
