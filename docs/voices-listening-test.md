@@ -1,5 +1,7 @@
 # Локальные голоса: образцы для прослушивания
 
+**Выбор пользователя: Piper Denis.** Другие голоса больше не ищем. Выбор зафиксирован для будущей интеграции; Denis не включён автоматически в установленном приложении, его настройки не изменены.
+
 20 сентября 2026. Подготовлены одинаковые русские WAV-образцы Piper Denis, Piper Dmitri и Windows SAPI Irina. Микрофон и облачные API не использовались; звук автоматически не воспроизводился. Настройки установленного Assistant Jeff не менялись.
 
 Финальные файлы находятся в `C:\Users\User\Documents\Codex\2026-09-19\assistant-jeff\outputs\voices`: `piper-denis.wav`, `piper-dmitri.wav`, `sapi-irina.wav`, `sample-text.txt`, `piper-metrics.json`, `sapi-metrics.json`. Аудио не включается в Git.
