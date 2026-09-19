@@ -55,6 +55,19 @@ test('successful loop sends projected model input and independently verifies goa
   assert.equal(result.completed[0].outcome, 'verified');
 });
 
+test('awaited event persistence precedes effects and a failed write prevents execution', async () => {
+  let persisted=false;
+  const success=fixture();const execute=success.adapter.execute;
+  success.adapter.execute=(...args)=>{assert.equal(persisted,true);return execute(...args);};
+  const accepted=await run(success,{onEvent:async event=>{if(event.phase==='execute'){await new Promise(resolve=>setTimeout(resolve,5));persisted=true;}}});
+  assert.equal(accepted.ok,true);
+  const blocked=fixture();
+  const rejected=await run(blocked,{onEvent:async event=>{if(event.phase==='execute')throw Object.assign(new Error('write failed'),{code:'LOG_WRITE_FAILED'});}});
+  assert.equal(rejected.ok,false);
+  assert.equal(blocked.executions.length,0);
+  assert.equal(rejected.trace.at(-1).code,'LOG_WRITE_FAILED');
+});
+
 test('unknown ids, unsupported and low confidence never execute', async () => {
   for (const [response, reason] of [
     [{ choice: 'missing', actionId: 'missing', probability: 1, confidence: 1 }, 'unknown_action'],

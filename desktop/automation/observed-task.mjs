@@ -28,10 +28,11 @@ export function buildObservedCandidates(snapshot) {
   })));
 }
 
-export async function runObservedTask({ command, adapter, choose, signal, maxSteps = 8, maxDurationMs = 30000 } = {}) {
+export async function runObservedTask({ command, adapter, choose, signal, onEvent = () => {}, maxSteps = 8, maxDurationMs = 30000 } = {}) {
   const started = performance.now();
   const trace = [];
   const completed = [];
+  const record = async event => { trace.push(event); await onEvent(event); };
   // Stable element/action IDs are scoped to observed generations for model history.
   // Returning to a target in a new generation is valid; replay in the same is not.
   const generations = new Map();
@@ -56,7 +57,7 @@ export async function runObservedTask({ command, adapter, choose, signal, maxSte
   const goal = async (snapshot, step) => {
     const satisfied = await call(() => adapter.isGoalSatisfied(snapshot, command, options));
     if (typeof satisfied !== 'boolean') throw stopError('invalid_goal_check');
-    trace.push({ step, phase: 'goal', version: snapshot.version, satisfied });
+    await record({ step, phase: 'goal', version: snapshot.version, satisfied });
     return satisfied;
   };
   let phase = 'observe';
@@ -64,7 +65,7 @@ export async function runObservedTask({ command, adapter, choose, signal, maxSte
     for (let step = 1; step <= maxSteps; step++) {
       phase = 'observe';
       const before = projectSnapshot(await call(() => adapter.observe(options)));
-      trace.push({ step, phase, snapshot: before });
+      await record({ step, phase, snapshot: before });
       if (await goal(before, step)) return result(true, 'goal_verified');
       if (!generations.has(before.version)) generations.set(before.version, `g${generations.size + 1}`);
       const generation = generations.get(before.version);
@@ -79,7 +80,7 @@ export async function runObservedTask({ command, adapter, choose, signal, maxSte
       };
       phase = 'choose';
       const decision = await call(() => choose(modelInput, options));
-      trace.push({ step, phase: 'decision', choice: decision?.choice, actionId: decision?.actionId, probability: decision?.probability, confidence: decision?.confidence });
+      await record({ step, phase: 'decision', choice: decision?.choice, actionId: decision?.actionId, probability: decision?.probability, confidence: decision?.confidence });
       if (decision?.choice === 'done') return result(false, 'goal_not_verified');
       if (decision?.choice === 'unsupported') return result(false, 'unsupported');
       if (decision?.actionId == null) return result(false, 'no_action');
@@ -89,12 +90,12 @@ export async function runObservedTask({ command, adapter, choose, signal, maxSte
       phase = 'observe';
       const fresh = projectSnapshot(await call(() => adapter.observe(options)));
       if (before.version !== fresh.version || JSON.stringify(before) !== JSON.stringify(fresh)) {
-        trace.push({ step, phase: 'stale', expectedVersion: before.version, observedVersion: fresh.version });
+        await record({ step, phase: 'stale', expectedVersion: before.version, observedVersion: fresh.version });
         continue;
       }
       gate();
       phase = 'execute';
-      trace.push({ step, phase, candidate: { ...candidate }, expectedVersion: fresh.version });
+      await record({ step, phase, candidate: { ...candidate }, expectedVersion: fresh.version });
       const receipt = await call(() => adapter.execute({ ...candidate }, { expectedVersion: fresh.version, signal: controller.signal }));
       if (receipt == null) return result(false, 'execution_uncertain');
       phase = 'observe_after';
@@ -102,7 +103,7 @@ export async function runObservedTask({ command, adapter, choose, signal, maxSte
       phase = 'verify';
       const verification = await call(() => adapter.verify({ before: fresh, after, candidate: { ...candidate }, receipt }, options));
       const verified = verification?.outcome === 'verified' && validText(verification.evidence, 1500);
-      trace.push({ step, phase, outcome: verified ? 'verified' : 'not_verified', evidence: validText(verification?.evidence, 1500) ? verification.evidence : 'No independent verification.', after });
+      await record({ step, phase, outcome: verified ? 'verified' : 'not_verified', evidence: validText(verification?.evidence, 1500) ? verification.evidence : 'No independent verification.', after });
       if (!verified) return result(false, 'not_verified');
       completed.push({ id: candidate.id, label: candidate.label, outcome: 'verified' });
       if (await goal(after, step)) return result(true, 'goal_verified');
@@ -110,7 +111,7 @@ export async function runObservedTask({ command, adapter, choose, signal, maxSte
     return result(false, 'step_limit');
   } catch (error) {
     const reason = controller.signal.aborted ? abortReason : error?.reason === 'invalid_snapshot' || error?.reason === 'invalid_goal_check' ? error.reason : phase === 'execute' || phase === 'observe_after' || phase === 'verify' ? 'execution_uncertain' : 'dependency_error';
-    trace.push({ phase: 'stop', during: phase, reason });
+    await record({ phase: 'stop', during: phase, reason, ...(typeof error?.code === 'string' && /^[A-Z_]{1,60}$/.test(error.code) ? {code:error.code} : {}) });
     return result(false, reason);
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
 }

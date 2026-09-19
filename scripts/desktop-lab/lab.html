@@ -11,22 +11,23 @@
 <body>
   <main>
     <header><div><p class="eyebrow">ТЕСТОВЫЙ СТЕНД</p><h1>Jeff Windows Lab</h1></div><span id="status" class="badge" role="status">Проверка состояния…</span></header>
-    <p class="intro">Jev выбирает действие по наблюдению Windows UI Automation. Отдельное тестовое окно содержит настоящие Windows-контролы. Стенд не управляет Яндексом и вашими открытыми приложениями.</p>
+    <p class="intro">Jev выбирает действие по наблюдению Windows UI Automation. Белое окно — наша песочница с настоящими Windows-контролами: оно нужно на время прогона и автоматически открывается или восстанавливается по кнопке «Выполнить». Стенд не управляет Яндексом и вашими открытыми приложениями.</p>
     <section class="controls" aria-labelledby="scenario-title">
       <h2 id="scenario-title">Команда и ожидаемый результат</h2>
-      <div class="scenario-row"><label for="scenario">Сценарий</label><select id="scenario"><option value="tabs">Вкладки</option><option value="music">Воспроизведение</option></select><span class="threshold">Порог действия: P ≥ 0,80 · confidence ≥ 0,80</span></div>
+      <div class="scenario-row"><label for="scenario">Пример команды</label><select id="scenario"><option value="custom">Своя команда</option><option value="tabs">Первая вкладка ВК</option><option value="music_on">Включить музыку</option><option value="music_off">Выключить музыку</option><option value="language">Переключить тестовый язык</option></select><span class="threshold">Порог действия: P ≥ 0,80 · confidence ≥ 0,80</span></div>
       <p id="goal" class="goal"></p>
       <label for="command">Проверяемая команда для Jev</label>
-      <textarea id="command" rows="2" maxlength="1024" spellcheck="false" readonly aria-describedby="command-help"></textarea>
-      <div class="field-meta"><span id="command-help">Две фиксированные задачи с проверкой результата по UIA. Варианты формулировок сравниваются в отдельном A/B-тесте.</span><span id="counter">0 / 1024</span></div>
-      <div class="actions"><button id="start" type="button">Открыть тестовое окно</button><button id="run" type="button" class="primary">Выполнить</button><button id="stop" type="button" disabled>Стоп</button><button id="refresh" type="button">Обновить наблюдение</button></div>
-      <p id="activity" role="status" aria-live="polite">Откройте тестовое окно, затем выполните команду.</p>
+      <textarea id="command" rows="2" maxlength="1024" spellcheck="false" aria-describedby="command-help" placeholder="Например: открой первую вкладку ВКонтакте"></textarea>
+      <div class="field-meta"><span id="command-help">Напишите свою команду или отредактируйте пример. Модель работает только с контролами песочницы; язык здесь тестовый, системная раскладка не меняется.</span><span id="counter">0 / 1024</span></div>
+      <div class="actions"><button id="start" type="button">Открыть тестовое окно</button><button id="run" type="button" class="primary">Выполнить</button><button id="stop" type="button" disabled>Стоп</button><button id="refresh" type="button">Обновить наблюдение</button><button id="history" type="button">Журнал</button></div>
+      <p id="activity" role="status" aria-live="polite">Введите команду и нажмите «Выполнить» — песочница откроется автоматически.</p>
       <p id="error" class="error" role="alert" hidden></p>
     </section>
     <div class="workspace">
       <section aria-labelledby="observation-title"><div class="section-heading"><h2 id="observation-title">Наблюдение UIA</h2><span id="snapshot-version" class="muted">Нет снимка</span></div><p id="summary" class="muted">Элементы появятся после открытия тестового окна.</p><ul id="elements" class="elements"></ul><details><summary>Факты и метаданные</summary><pre id="facts">Нет данных</pre></details></section>
-      <section aria-labelledby="result-title"><h2 id="result-title">Проверка результата</h2><p id="verification" class="verification" role="status">Ещё не выполнялась</p><p id="result-meta" class="muted"></p><h3>Решения и задержки</h3><div id="decisions" class="decisions"><p class="muted">Здесь будут фактические решения модели.</p></div><details><summary>Полный отчёт и запросы модели</summary><pre id="trace">Нет данных</pre></details></section>
+      <section aria-labelledby="result-title"><h2 id="result-title">Проверка результата</h2><p id="verification" class="verification" role="status">Ещё не выполнялась</p><p id="result-meta" class="muted"></p><p id="run-meta" class="muted"></p><h3>План и цель</h3><p id="goal-status" class="muted">План ещё не получен.</p><pre id="plan">Нет данных</pre><h3>Ход выполнения</h3><div id="decisions" class="decisions"><p class="muted">Здесь будут фактические шаги и ответы модели.</p></div><details><summary>Полный отчёт и запросы модели</summary><pre id="trace">Нет данных</pre></details></section>
     </div>
+    <section id="history-panel" class="history-panel" hidden aria-labelledby="history-title"><div class="section-heading"><h2 id="history-title">Последние 20 сессий</h2><button id="open-logs" type="button">Открыть папку журналов</button></div><p id="history-status" class="muted"></p><ul id="history-list" class="history-list"></ul><details id="history-report"><summary>Выбранная сессия: полный JSON</summary><pre id="history-json">Выберите запись выше.</pre></details></section>
     <footer>Это отдельный стенд: установленный Assistant Jeff не меняется. В сценарии воспроизведения проверяется состояние контрола; звук не проигрывается.</footer>
   </main>
 </body>

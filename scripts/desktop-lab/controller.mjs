@@ -2,11 +2,14 @@ import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {access, mkdir, writeFile} from 'node:fs/promises';
+import {access} from 'node:fs/promises';
 import {readProtected} from '../../desktop/secrets.mjs';
 import {chooseUiAction,buildUiChoiceRequest} from '../../desktop/providers/ui-choice.mjs';
 import {runObservedTask} from '../../desktop/automation/observed-task.mjs';
-import {validateScenarioCommand,firstVkTarget,isLabGoalSatisfied,isSupportedLabCandidate,verifyLabAction} from './scenarios.mjs';
+import {isSupportedLabCandidate,verifyLabAction} from './scenarios.mjs';
+import {compileLabGoal,buildLabGoalRequest} from '../../desktop/providers/lab-goal.mjs';
+import {validateCommand,goalSatisfied} from './goal-contract.mjs';
+import {RunJournal,listRuns,readRun,LOG_DIRECTORY,redact} from './journal.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const bin = path.join(root, 'work', 'desktop-lab', 'bin');
@@ -84,17 +87,25 @@ export class NativeLab {
     }
     assertActive(signal);
     if (!this.bridge || this.bridge.closed) this.bridge=new Bridge(this.target.pid);
-    // Read-only readiness retries: no actions are issued here.
+    // Explicit user Start/Run prepares only our owned window (including restore).
     let last;
     for (let attempt=0;attempt<12;attempt++) {
       assertActive(signal);
-      try {return await this.state({signal});} catch(error) {assertActive(signal);last=error;if(this.bridge.closed)break;await delay(250,signal);}
+      try {
+        const prepared=await this.bridge.request('prepare',{},signal);
+        this.remember(prepared.snapshot);
+        return {running:this.running,snapshot:prepared.snapshot,restored:prepared.restored};
+      } catch(error) {assertActive(signal);last=error;if(this.bridge.closed)break;await delay(250,signal);}
     }
     throw last ?? fail('TARGET_NOT_READY');
   }
   async observe(signal) {
     if (!this.bridge) throw fail('START_TEST_WINDOW_FIRST');
+    if(this.target?.exitCode!==null||this.target?.killed)throw fail('TARGET_NOT_RUNNING');
     const snapshot=await this.bridge.request('observe',{},signal);
+    return this.remember(snapshot);
+  }
+  remember(snapshot) {
     if (!snapshot || typeof snapshot.version !== 'string' || !Array.isArray(snapshot.elements) || !snapshot.facts) throw fail('INVALID_SNAPSHOT');
     this.snapshots.set(snapshot.version,snapshot);
     while(this.snapshots.size>32)this.snapshots.delete(this.snapshots.keys().next().value);
@@ -102,55 +113,104 @@ export class NativeLab {
     return snapshot;
   }
   async state({signal}={}) { assertActive(signal);return {running:this.running,snapshot:await this.observe(signal)}; }
-  stop() {this.abort?.abort();return {stopped:true};}
-  async run({scenario,command}={}) {
+  stop() {this.abort?.abort('user_stop');return {stopped:true};}
+  history(){return listRuns({activeRunId:this.activeRunId});}
+  readRun({runId}={}){return readRun(runId,{activeRunId:this.activeRunId});}
+  get logDirectory(){return LOG_DIRECTORY;}
+  async run({command}={}) {
     if(this.running)throw fail('TASK_ALREADY_RUNNING');
-    validateScenarioCommand(scenario,command);
+    command=validateCommand(command);
     this.running=true; this.abort=new AbortController();
     const signal=this.abort.signal;
-    const report={createdAt:new Date().toISOString(),mode:'REAL_API_REAL_WINDOWS_UIA_TEST_WINDOW',scenario,command,calls:[]};
+    const started=performance.now();
+    const timeout=setTimeout(()=>this.abort?.abort('time_limit'),60000);
+    const report={createdAt:new Date().toISOString(),mode:'REAL_API_REAL_WINDOWS_UIA_TEST_WINDOW',command,calls:[],trace:[],completed:[]};
+    let journal;
+    let finishing=false;
+    const event=async(phase,data={})=>{
+      if(finishing&&phase!=='result')return;
+      const recorded=await journal.record(phase,data);
+      this.progress(recorded);
+      return recorded;
+    };
     try {
-      await this.start({signal});
+      journal=await RunJournal.create(command);this.activeRunId=journal.runId;
+      report.runId=journal.runId;report.logPath=journal.jsonPath;
+      await event('window_prepare',{message:'Открываем или восстанавливаем тестовое окно.',logPath:report.logPath});
+      const prepared=await this.start({signal});
+      await event('window_ready',{restored:prepared.restored,snapshot:prepared.snapshot,message:prepared.restored?'Тестовое окно восстановлено.':'Тестовое окно готово.'});
       if(signal.aborted)throw fail('ABORTED');
       const apiKey=process.env.TYPESAFE_API_KEY||await readProtected(path.join(root,'data','secrets','typesafe.dpapi'));
       if(!apiKey)throw fail('TYPESAFE_KEY_MISSING');
       const initial=await this.observe(signal);
       report.initial=initial;
-      const firstVk=firstVkTarget(initial);
+      const goalInput={command,currentFacts:initial.facts};
+      const goalCall={kind:'goal',request:buildLabGoalRequest(goalInput)};
+      report.calls.push(goalCall);
+      await event('model_request',{kind:'goal',request:goalCall.request,message:'Jev определяет проверяемую цель команды.'});
+      try{
+        report.plan=await compileLabGoal(goalInput,{apiKey,signal,onResponse:response=>{goalCall.response=response;void event('model_response',{kind:'goal',response,message:'Получен ответ Jev о цели.'}).catch(()=>{});}});
+        goalCall.decision=report.plan;
+      }catch(error){goalCall.error=/^[A-Z_]{1,60}$/.test(error.code)?error.code:'LAB_ERROR';throw error;}
+      await journal.flush();
+      report.goal=report.plan.goal;
+      await event('plan',{plan:report.plan,goal:report.goal,message:report.plan.ok?'Цель определена; проверяем состояние окна.':'Команда не допущена к исполнению.'});
+      if(!report.plan.ok){report.ok=false;report.reason=report.plan.reason==='no_action'?'no_request':report.plan.reason==='low_confidence'?'goal_low_confidence':report.plan.reason;return report;}
       const adapter={
-        observe:async({signal}={})=>this.observe(signal),
+        observe:async({signal}={})=>{
+          const t=performance.now();const snapshot=await this.observe(signal);
+          await event('native_observation',{snapshot,latencyMs:Math.round(performance.now()-t),message:'Получено свежее наблюдение Windows.'});return snapshot;
+        },
         execute:async(candidate,{expectedVersion,signal})=>{
           assertActive(signal);
           if(!isSupportedLabCandidate(this.snapshots.get(expectedVersion),candidate))throw fail('UNSUPPORTED_CONTROL');
-          this.progress({phase:'execute',message:`${candidate.operation}: ${candidate.label}`});
-          return this.bridge.request('execute',{targetId:candidate.targetId,operation:candidate.operation,expectedVersion},signal);
+          await event('native_execute_request',{candidate,expectedVersion,message:`${candidate.operation}: ${candidate.label}`});
+          assertActive(signal);
+          const t=performance.now();
+          const receipt=await this.bridge.request('execute',{targetId:candidate.targetId,operation:candidate.operation,expectedVersion},signal);
+          await event('native_execute_result',{receipt,latencyMs:Math.round(performance.now()-t),message:'Исполнитель вернул результат; проверяем факты.'});
+          return receipt;
         },
         verify:async({before,after,candidate})=>verifyLabAction({before:this.snapshots.get(before.version),after:this.snapshots.get(after.version),candidate}),
-        isGoalSatisfied:async snapshot=>isLabGoalSatisfied(scenario,this.snapshots.get(snapshot.version),firstVk),
+        isGoalSatisfied:async snapshot=>goalSatisfied(report.goal,this.snapshots.get(snapshot.version)),
       };
-      const result=await runObservedTask({command,adapter,signal,maxSteps:6,maxDurationMs:45000,
+      const result=await runObservedTask({command,adapter,signal,maxSteps:8,maxDurationMs:Math.max(1,Math.round(60000-(performance.now()-started))),
+        onEvent:async item=>event(item.phase,{...item,message:({observe:'Состояние перед шагом.',decision:'Выбор следующего действия.',goal:'Проверка достижения цели.',verify:'Проверка результата действия.',stale:'Окно изменилось; перечитываем.',stop:'Цикл остановлен.'})[item.phase]??'Шаг исполнения.'}),
         choose:async(input,{signal})=>{
-          const call={input,request:buildUiChoiceRequest(input)};
+          const call={kind:'action',input,request:buildUiChoiceRequest(input)};
           report.calls.push(call);
+          await event('model_request',{kind:'action',request:call.request,message:'Отправляем наблюдение и варианты действий в Jev.'});
           let decision;
-          try {decision=await chooseUiAction(input,{apiKey,signal,onResponse:response=>{call.response=response;}});}
+          try {decision=await chooseUiAction(input,{apiKey,signal,onResponse:response=>{call.response=response;void event('model_response',{kind:'action',response,message:'Получен ответ Jev о действии.'}).catch(()=>{});}});}
           catch(error){call.error=/^UI_[A-Z_]{1,50}$/.test(error.code)?error.code:'UI_ERROR';throw error;}
+          await journal.flush();
           call.decision=decision;
-          this.progress({phase:'decision',choice:decision.choice,probability:decision.probability,confidence:decision.confidence,latencyMs:decision.latencyMs});
+          await event('model_decision',{...decision,message:'Проверены выбранный id, вероятность и уверенность.'});
           return decision;
         }});
       Object.assign(report,result);
+      report.loopElapsedMs=result.elapsedMs;
+      report.errorCode=result.trace.findLast(e=>e.phase==='stop')?.code;
+      if(report.reason==='no_action')report.reason='action_low_confidence';
       report.final=this.lastSnapshot;
-      this.progress({phase:'result',message:result.ok?'Результат подтверждён чтением Windows UIA.':`Остановка: ${result.reason}`});
       return report;
     } catch(error) {
-      Object.assign(report,{ok:false,reason:signal.aborted?'aborted':/^[A-Z_]{1,60}$/.test(error.code)?error.code:'LAB_ERROR'});
+      Object.assign(report,{ok:false,reason:signal.aborted?(signal.reason==='time_limit'?'time_limit':'aborted'):/^[A-Z_]{1,60}$/.test(error.code)?error.code:'LAB_ERROR'});
       return report;
     } finally {
-      this.running=false;this.abort=null;
-      const directory=path.join(root,'work','desktop-lab','runs');
-      await mkdir(directory,{recursive:true});
-      await writeFile(path.join(directory,`${Date.now()}.json`),JSON.stringify(report,null,2)+'\n');
+      finishing=true;
+      clearTimeout(timeout);
+      report.elapsedMs=Math.round(performance.now()-started);
+      if(journal){
+        try{
+          await event('result',{ok:report.ok,reason:report.reason,errorCode:report.errorCode,elapsedMs:report.elapsedMs,goal:report.goal,message:report.ok?'Цель подтверждена чтением Windows.':`Остановка: ${report.reason}`});
+          report.events=journal.events;
+          await journal.finish(report);
+        }catch{report.ok=false;report.reason='LOG_WRITE_FAILED';report.events=journal.events;}
+      }
+      // The returned report follows the same redaction policy as durable logs.
+      Object.assign(report,redact(report));
+      this.running=false;this.abort=null;this.activeRunId=null;
     }
   }
   dispose() {this.stop();this.bridge?.close();this.target?.kill();this.target=null;}

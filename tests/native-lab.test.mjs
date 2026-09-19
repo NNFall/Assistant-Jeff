@@ -19,13 +19,12 @@ const state = (facts = {}) => ({
 });
 const verify = (targetId, before, after, operation = 'click') => verifyLabAction({ before, after, candidate: { targetId, operation } }).outcome;
 
-test('only exact fixed scenario commands are accepted before startup', async () => {
-  for (const [scenario, spec] of Object.entries(LAB_SCENARIOS)) assert.equal(validateScenarioCommand(scenario, spec.command), spec);
+test('malformed manual commands are rejected before startup', async () => {
   const lab = new NativeLab();
   let starts = 0;
   lab.start = async () => { starts++; throw new Error('Must not start'); };
-  for (const [scenario, command] of [['music', 'Останови воспроизведение'], ['tabs', 'Открой вторую вкладку'], ['other', LAB_SCENARIOS.tabs.command], ['music', LAB_SCENARIOS.music.command + ' ']]) {
-    await assert.rejects(lab.run({ scenario, command }), { code: 'INVALID_COMMAND' });
+  for (const command of ['', null, ' '.repeat(4), 'a'.repeat(1025), 'hello\u0000']) {
+    await assert.rejects(lab.run({ command }));
   }
   assert.equal(starts, 0);
   assert.equal(lab.running, false);

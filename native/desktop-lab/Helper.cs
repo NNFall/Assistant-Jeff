@@ -39,9 +39,11 @@ internal sealed class LabHelper : IDisposable
         try { process = Process.GetProcessById(pid); } catch { throw new LabError("TARGET_NOT_RUNNING"); }
         try
         {
-            if (process.HasExited || process.SessionId != Process.GetCurrentProcess().SessionId || !String.Equals(Path.GetFullPath(process.MainModule.FileName), executable, StringComparison.OrdinalIgnoreCase) || (started != 0 && process.StartTime.ToUniversalTime().Ticks != started)) throw new LabError("TARGET_IDENTITY_MISMATCH");
+            if (process.HasExited) throw new LabError("TARGET_NOT_RUNNING");
+            if (process.SessionId != Process.GetCurrentProcess().SessionId || !String.Equals(Path.GetFullPath(process.MainModule.FileName), executable, StringComparison.OrdinalIgnoreCase) || (started != 0 && process.StartTime.ToUniversalTime().Ticks != started)) throw new LabError("TARGET_IDENTITY_MISMATCH");
             return process;
         }
+        catch (LabError) { process.Dispose(); throw; }
         catch { process.Dispose(); throw new LabError("TARGET_IDENTITY_MISMATCH"); }
     }
     private static string SafeText(string text) { return (text ?? "").Length > 160 ? text.Substring(0, 160) : text ?? ""; }
@@ -62,12 +64,42 @@ internal sealed class LabHelper : IDisposable
         return id;
     }
     private static string RuntimeId(AutomationElement element) { return String.Join(".", ((UIA3FrameworkAutomationElement)element.FrameworkAutomationElement).NativeElement.GetRuntimeId().Select(x => x.ToString()).ToArray()); }
-    private Dictionary<string, object> Observe()
+    private AutomationElement TargetWindow()
     {
         IntPtr handle;
         using (var process = ValidProcess()) { handle = process.MainWindowHandle; if (handle == IntPtr.Zero) throw new LabError("TARGET_WINDOW_UNAVAILABLE"); }
         var root = automation.FromHandle(handle);
         if (root.Properties.ProcessId.Value != pid || root.Name != "Jeff Desktop Lab Target") throw new LabError("TARGET_WINDOW_MISMATCH");
+        return root;
+    }
+    private static WindowVisualState WindowState(AutomationElement root)
+    {
+        if (!root.Patterns.Window.IsSupported) throw new LabError("TARGET_WINDOW_STATE_UNAVAILABLE");
+        return root.Patterns.Window.Pattern.WindowVisualState.Value;
+    }
+    private object Prepare()
+    {
+        var root = TargetWindow(); var previous = WindowState(root);
+        bool restored = previous == WindowVisualState.Minimized;
+        if (restored)
+        {
+            using (var process = ValidProcess()) { if (root.Properties.ProcessId.Value != process.Id) throw new LabError("TARGET_IDENTITY_MISMATCH"); }
+            root.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Normal);
+        }
+        for (int attempt = 0; ; attempt++)
+        {
+            try { return new { restored = restored, previousWindowState = previous.ToString(), snapshot = Observe() }; }
+            catch (LabError error)
+            {
+                if (attempt >= 4 || (error.Code != "TARGET_WINDOW_MINIMIZED" && error.Code != "TARGET_SURFACE_MISSING")) throw;
+                Thread.Sleep(100);
+            }
+        }
+    }
+    private Dictionary<string, object> Observe()
+    {
+        var root = TargetWindow(); var windowState = WindowState(root);
+        if (windowState == WindowVisualState.Minimized) throw new LabError("TARGET_WINDOW_MINIMIZED");
         var surface = root.FindFirstDescendant(automation.ConditionFactory.ByName("Jeff lab actions"));
         if (surface == null || surface.Properties.ProcessId.Value != pid) throw new LabError("TARGET_SURFACE_MISSING");
         var next = new Dictionary<string, ActionTarget>();
@@ -125,7 +157,7 @@ internal sealed class LabHelper : IDisposable
             { "version", version }, { "app", "Jeff Desktop Lab Target" },
             { "summary", "Observed UIA state: selected tab = " + selectedTab + "; playback = " + playback + "; MOCK in-app language = " + language + ". Tab ordinals follow visible UIA geometry within each tab group. Music controls are available only on the Music tab. Isolated test app; not a real browser, audio player or OS keyboard layout." },
             { "elements", elements }, { "facts", facts },
-            { "metadata", new { processId = pid, scannedElements = scanned, actionCount = next.Values.Count(x => x.Capabilities.Length > 0), monitorCount = Screen.AllScreens.Length, provider = "FlaUI.UIA3 5.0.0", isolated = true } }
+            { "metadata", new { processId = pid, windowState = windowState.ToString(), scannedElements = scanned, actionCount = next.Values.Count(x => x.Capabilities.Length > 0), monitorCount = Screen.AllScreens.Length, provider = "FlaUI.UIA3 5.0.0", isolated = true } }
         };
     }
     private object Execute(Dictionary<string, object> args)
@@ -144,7 +176,7 @@ internal sealed class LabHelper : IDisposable
         return new { executed = new { targetId = targetId, operation = operation }, snapshot = Observe() };
     }
     private static string Required(Dictionary<string, object> obj, string key) { object value; if (!obj.TryGetValue(key, out value) || !(value is string) || ((string)value).Length == 0 || ((string)value).Length > 256) throw new LabError("INVALID_ARGUMENT"); return (string)value; }
-    private object Dispatch(string method, Dictionary<string, object> args) { if (method == "observe") return Observe(); if (method == "execute") return Execute(args); throw new LabError("UNKNOWN_METHOD"); }
+    private object Dispatch(string method, Dictionary<string, object> args) { if (method == "observe") return Observe(); if (method == "prepare") return Prepare(); if (method == "execute") return Execute(args); throw new LabError("UNKNOWN_METHOD"); }
     private static string ReadBoundedLine() { var builder = new StringBuilder(); bool overflow = false; int ch; while ((ch = Console.In.Read()) != -1 && ch != '\n') { if (builder.Length < 65536) builder.Append((char)ch); else overflow = true; } if (ch == -1 && builder.Length == 0) return null; if (overflow) return ""; return builder.ToString().TrimEnd('\r'); }
     public void Dispose() { automation.Dispose(); }
     [STAThread] private static int Main(string[] args)

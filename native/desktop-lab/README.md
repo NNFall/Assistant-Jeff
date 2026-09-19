@@ -8,6 +8,12 @@ The controller launches `work/desktop-lab/bin/JeffDesktopLabTarget.exe` visibly 
 
 UTF-8 stdin/stdout, one JSON object per line (64 KiB maximum). The controller should impose an overall request timeout and terminate a hung helper; UIA COM calls can block on an unresponsive target.
 
+`observe` and `execute` never restore a window implicitly. A minimized fixture returns `TARGET_WINDOW_MINIMIZED` before traversing its unavailable surface; a closed process returns `TARGET_NOT_RUNNING`, while a running process without a main window returns `TARGET_WINDOW_UNAVAILABLE`. `TARGET_SURFACE_MISSING` means the non-minimized, correctly bound window does not expose the expected UIA client surface.
+
+For an explicit user start/recovery action, send `{"id":1,"method":"prepare","args":{}}`. It validates the original PID/path/session/start time, reads the UIA WindowPattern state, and only if minimized restores that same fixture with `SetWindowVisualState(Normal)`. Result: `{restored,previousWindowState,snapshot}`; a normal/maximized fixture is only observed. Readiness retries are bounded to five attempts, with 100 ms pauses only for transient minimized/missing-surface results. It does not reset content, launch processes, switch tabs, change other windows or steal focus using global input. Background status polling should use `observe`, not `prepare`. A closed target must be explicitly relaunched by the owning controller with a fresh helper binding.
+
+To build while an existing fixture/helper is in use, pass `-OutputDirectory "<repo>/work/desktop-lab/staging-bin"`; the output directory must be below `work/desktop-lab`. This leaves running user binaries untouched. The controller can later rebuild the normal `bin` after closing only its own processes.
+
 ```json
 {"id":1,"method":"observe","args":{}}
 {"id":2,"method":"execute","args":{"targetId":"el1","operation":"select","expectedVersion":"version-from-observe"}}

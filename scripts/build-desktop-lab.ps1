@@ -1,11 +1,13 @@
 [CmdletBinding()]
-param()
+param([string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $source = Join-Path $repo 'native\desktop-lab'
 $work = Join-Path $repo 'work\desktop-lab'
 $packages = Join-Path $work 'packages'
-$bin = Join-Path $work 'bin'
+$bin = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $work 'bin' }
+$allowedOutputRoot = [IO.Path]::GetFullPath($work).TrimEnd('\') + '\'
+if (!$bin.StartsWith($allowedOutputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'OutputDirectory must stay under the repository work/desktop-lab directory.' }
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $compiler = Join-Path $framework 'csc.exe'
 if (!(Test-Path -LiteralPath $compiler)) { throw 'Windows .NET Framework C# compiler missing. No global SDK is installed by this script.' }
