@@ -1,0 +1,9 @@
+openwakeword==0.6.0
+faster-whisper==1.2.1
+sounddevice==0.5.6
+webrtcvad-wheels==2.0.14
+pystray==0.19.5
+Pillow==12.3.0
+pywin32==312
+psutil==7.2.2
+pycaw==20251023

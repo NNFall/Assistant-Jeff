@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; media-src 'self' blob:; worker-src 'self'">
+  <title>Assistant Jeff</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="Jeff — обзор"><span class="brand-symbol">j<span>✦</span></span><span>jeff<span class="brand-caption">ЛИЧНЫЙ ПОМОЩНИК</span></span></a>
+      <div class="workspace-label">ВАШЕ ПРОСТРАНСТВО</div>
+      <nav aria-label="Разделы">
+        <button class="nav-item active" data-tab="overview"><span class="nav-icon">◈</span>Обзор</button>
+        <button class="nav-item" data-tab="notes"><span class="nav-icon">▤</span>Заметки<span id="note-count" class="badge">0</span></button>
+        <button class="nav-item" data-tab="reminders"><span class="nav-icon">◷</span>Напоминания<span id="reminder-count" class="badge">0</span></button>
+        <button class="nav-item" data-tab="settings"><span class="nav-icon">⚙</span>Настройки</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="local-label"><span class="dot"></span>Ваш компьютер</div><p>Маленький помощник.<br>Больше свободных мыслей.</p><span id="version" class="version">ASSISTANT JEFF</span></div>
+    </aside>
+    <main>
+      <header class="topbar"><div class="breadcrumb">Моё пространство <span>/</span> <strong id="page-name">Обзор</strong></div><div class="top-status"><span id="top-dot" class="dot muted"></span><span id="top-status">Микрофон выключен</span></div></header>
+      <div id="availability" class="notice" hidden></div>
+      <section id="overview" class="page">
+        <div class="page-heading"><div><p class="eyebrow">МЕНЬШЕ РУТИНЫ, БОЛЬШЕ ВАШЕГО ВРЕМЕНИ</p><h1>Привет. Я рядом<span class="lavender">.</span></h1><p class="subtitle">Скажите, что нужно. Остальное оставьте мне.</p></div><span id="today" class="date-label"></span></div>
+        <div class="assistant-card">
+          <div class="hero-copy"><div id="state-label" class="state-pill"><span class="dot"></span>Готов помочь</div><h2 id="hero-title">Одна мысль —<br>одно простое действие.</h2><p id="hero-description">Сохраню идею, напомню о важном<br>или открою нужное приложение.</p><button id="voice-toggle" class="button primary"><span aria-hidden="true">◉</span><span id="voice-button-label">Включить микрофон</span></button><div class="voice-actions"><button id="activate-voice" class="button secondary" hidden>Сказать команду</button><button id="finish-voice" class="button secondary" hidden>Готово, обработать</button></div><p class="privacy-hint">В ожидании имени звук обрабатывается локально.</p></div>
+          <div class="orb-scene" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orb"><div class="orb-core"></div><div class="orb-shine"></div></div><div class="waveform"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span id="orb-caption">HEY JARVIS</span></div>
+        </div>
+        <form id="command-form" class="composer"><label class="sr-only" for="command-input">Команда помощнику</label><span class="composer-spark" aria-hidden="true">✦</span><input id="command-input" placeholder="Или просто напишите, чем помочь…" autocomplete="off" maxlength="4000"><button id="send-command" class="send-button" aria-label="Отправить команду">↑</button></form>
+        <div class="suggestions"><span>Попробуйте</span><button data-command="Запиши заметку: идея для нового проекта">Записать мысль <span>↗</span></button><button data-command="Напомни через 10 минут сделать перерыв">Напомнить о перерыве <span>↗</span></button><button data-command="Открой калькулятор">Открыть калькулятор <span>↗</span></button></div>
+        <div id="conversation" class="conversation" aria-live="polite" hidden></div>
+        <div class="section-heading"><h2>Под рукой</h2><span>Всё важное в одном месте</span></div>
+        <div class="dashboard-grid"><article class="summary-card"><div class="summary-heading"><span class="tile-icon purple">▤</span><h3>Последние заметки</h3><button class="text-button" data-tab="notes">Все заметки ↗</button></div><div id="recent-notes"></div></article><article class="summary-card"><div class="summary-heading"><span class="tile-icon peach">◷</span><h3>Ближайшие напоминания</h3><button class="text-button" data-tab="reminders">Все ↗</button></div><div id="recent-reminders"></div></article></div>
+        <div class="footer-note"><span>✧</span> Вы управляете микрофоном. Облачная обработка включается в настройках.</div>
+      </section>
+      <section id="notes" class="page" hidden><div class="page-heading"><div><p class="eyebrow">СВОБОДНОЕ МЕСТО ДЛЯ МЫСЛЕЙ</p><h1>Заметки<span class="lavender">.</span></h1><p class="subtitle">Идеи, которые не хочется потерять.</p></div></div><form id="note-form" class="entry-card"><label for="note-text">Новая заметка</label><textarea id="note-text" placeholder="Что хотите сохранить?" maxlength="10000" required></textarea><button class="button primary">Сохранить заметку</button></form><div id="notes-list" class="item-list"></div></section>
+      <section id="reminders" class="page" hidden><div class="page-heading"><div><p class="eyebrow">МОЖНО НЕ ДЕРЖАТЬ В ГОЛОВЕ</p><h1>Напоминания<span class="lavender">.</span></h1><p class="subtitle">В нужный момент я напомню.</p></div></div><form id="reminder-form" class="entry-card"><label for="reminder-text">О чём напомнить</label><input id="reminder-text" placeholder="Например, сделать перерыв" maxlength="2000" required><div class="form-row"><div><label for="reminder-date">Дата и время</label><input id="reminder-date" type="datetime-local" required></div><button class="button primary">Добавить напоминание</button></div><p class="field-help">Напоминания срабатывают, пока приложение запущено и компьютер не спит.</p></form><div id="reminders-list" class="item-list"></div></section>
+      <section id="settings" class="page" hidden><div class="page-heading"><div><p class="eyebrow">ТАК, КАК УДОБНО ВАМ</p><h1>Настройки<span class="lavender">.</span></h1><p class="subtitle">Голос, подключения и несколько простых привычек.</p></div></div><form id="settings-form"><div class="settings-card"><h2>Голосовой помощник</h2><div class="setting-row"><div><label for="wake-word">Имя для активации</label><p>Произнесите имя и дождитесь сигнала.</p></div><select id="wake-word" name="wakeWord"><option value="hey_jarvis">Hey Jarvis</option><option value="alexa">Alexa</option><option value="hey_mycroft">Hey Mycroft</option><option value="hey_rhasspy">Hey Rhasspy</option></select></div><div class="setting-row"><div><label for="wake-threshold">Порог распознавания</label><p>Выше — меньше случайных срабатываний.</p></div><div class="range-field"><input id="wake-threshold" name="wakeThreshold" type="range" min="0.1" max="0.95" step="0.05"><output id="threshold-value">0.5</output></div></div><div class="setting-row"><div><label for="microphone">Микрофон</label><p>Список устройств доступен после разрешения микрофона.</p></div><select id="microphone" name="microphoneId"><option value="">Системный по умолчанию</option></select></div><label class="setting-row"><span><strong>Отвечать голосом</strong><small>Системный голос Windows.</small></span><input type="checkbox" name="speakReplies" class="switch"></label><label class="setting-row"><span><strong>Запускать при входе в Windows</strong><small>Запускать в трее и включать микрофон при входе в Windows.</small></span><input type="checkbox" name="autoStart" class="switch"></label></div><div class="settings-card"><h2>Облачные возможности</h2><label class="setting-row"><span><strong>Использовать облачные модели</strong><small>После активации аудио отправляется в AssemblyAI, текст команды — в подключённую модель. Ожидание имени остаётся локальным.</small></span><input type="checkbox" name="cloudEnabled" class="switch"></label><div id="providers" class="provider-grid"></div><p class="field-help">Ключи хранятся вне интерфейса. Доступность соединения проверяется при запросе.</p></div><div class="settings-actions"><button class="button primary">Сохранить настройки</button><span id="settings-feedback" role="status"></span></div></form></section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
