@@ -1,3 +1,5 @@
+import { MIN_PROBABILITY, MIN_CONFIDENCE } from './decision-policy.mjs';
+
 /** Fixture prototype, not a production Windows runtime. No OS, network or file APIs.
  * Adapters own observation freshness and independent goal/verification semantics.
  * Every adapter method must honor options.signal and settle promptly on cancellation.
@@ -83,7 +85,7 @@ export async function runObservedTask({ command, adapter, choose, signal, maxSte
       if (decision?.actionId == null) return result(false, 'no_action');
       const candidate = candidates.find(item => item.id === decision.actionId);
       if (!candidate || decision.choice !== candidate.id) return result(false, 'unknown_action');
-      if (!Number.isFinite(decision.probability) || decision.probability < 0.85 || decision.probability > 1 || !Number.isFinite(decision.confidence) || decision.confidence < 0.8 || decision.confidence > 1) return result(false, 'low_confidence');
+      if (!Number.isFinite(decision.probability) || decision.probability < MIN_PROBABILITY || decision.probability > 1 || !Number.isFinite(decision.confidence) || decision.confidence < MIN_CONFIDENCE || decision.confidence > 1) return result(false, 'low_confidence');
       phase = 'observe';
       const fresh = projectSnapshot(await call(() => adapter.observe(options)));
       if (before.version !== fresh.version || JSON.stringify(before) !== JSON.stringify(fresh)) {

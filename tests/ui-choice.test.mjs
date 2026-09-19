@@ -29,9 +29,9 @@ test('chooses only current candidate id and exposes validated full distribution'
 
 test('user-selected probability/confidence boundaries and stop options produce no accidental action', async () => {
   const state = input();
-  assert.equal((await choose(state, payload(state, 'theme_dark', 0.8, 0.85))).actionId, 'theme_dark');
+  assert.equal((await choose(state, payload(state, 'theme_dark', 0.8, 0.8))).actionId, 'theme_dark');
   assert.equal((await choose(state, payload(state, 'theme_dark', 0.79, 1))).actionId, null);
-  assert.equal((await choose(state, payload(state, 'theme_dark', 1, 0.84))).actionId, null);
+  assert.equal((await choose(state, payload(state, 'theme_dark', 1, 0.79))).actionId, null);
   for (const stop of ['done', 'unsupported']) assert.equal((await choose(state, payload(state, stop))).actionId, null);
 });
 

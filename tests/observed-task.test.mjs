@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { buildObservedCandidates, runObservedTask } from '../desktop/automation/observed-task.mjs';
 
 const snapshot = (version = 'v1') => ({ version, app: 'Fixture', summary: 'Observed controls', elements: [{ id: 'settings', label: 'Настройки', capabilities: ['activate'] }, { id: 'dark', label: 'Тёмная тема', capabilities: ['select', 'click'] }] });
-const decision = candidate => ({ choice: candidate.id, actionId: candidate.id, probability: 0.85, confidence: 0.8 });
+const decision = candidate => ({ choice: candidate.id, actionId: candidate.id, probability: 0.8, confidence: 0.8 });
 function fixture(overrides = {}) {
   let state = snapshot();
   let goal = false;
@@ -60,7 +60,8 @@ test('unknown ids, unsupported and low confidence never execute', async () => {
     [{ choice: 'missing', actionId: 'missing', probability: 1, confidence: 1 }, 'unknown_action'],
     [{ choice: 'unsupported', actionId: null }, 'unsupported'],
     [{ choice: 'g1_a_dark_select', actionId: null }, 'no_action'],
-    [{ choice: 'g1_a_dark_select', actionId: 'g1_a_dark_select', probability: 0.84, confidence: 1 }, 'low_confidence'],
+    [{ choice: 'g1_a_dark_select', actionId: 'g1_a_dark_select', probability: 0.79, confidence: 1 }, 'low_confidence'],
+    [{ choice: 'g1_a_dark_select', actionId: 'g1_a_dark_select', probability: 1, confidence: 0.79 }, 'low_confidence'],
   ]) {
     const f = fixture();
     const result = await run(f, { choose: async () => response });

@@ -1,0 +1,10 @@
+{
+  "framework": "net48",
+  "source": "https://api.nuget.org/v3-flatcontainer",
+  "packages": [
+    {"id":"FlaUI.Core","version":"5.0.0","sha256":"191CC65EA82036B77F1872E6D4EBF743D3D120895BBA2FA5248D126CD6F568A7","license":"MIT","licenseFile":"LICENSE.txt","dll":"lib/net48/FlaUI.Core.dll","dependencies":["System.Management@8.0.0"]},
+    {"id":"FlaUI.UIA3","version":"5.0.0","sha256":"D5D2E083539A04BF6C9053781DFD47332854A76FAEB8E9C3C68CC82109F711F2","license":"MIT","licenseFile":"LICENSE.txt","dll":"lib/net48/FlaUI.UIA3.dll","dependencies":["FlaUI.Core@5.0.0","Interop.UIAutomationClient@10.19041.0"]},
+    {"id":"Interop.UIAutomationClient","version":"10.19041.0","sha256":"0D2ED17DB2CB13A262F0580AB992DB87577651C25A9899053DF4114B4D9FF3B1","license":"MIT","licenseFile":"LICENSE.txt","dll":"lib/net45/Interop.UIAutomationClient.dll","dependencies":[]},
+    {"id":"System.Management","version":"8.0.0","sha256":"1F0A5F0DBFBEABBFEFC51EAAE7B986160979534BF1CBEA1127AA2B14A3917CFD","license":"MIT","licenseFile":"LICENSE.TXT","dll":null,"dependencies":[],"note":"NuGet net462/net48 resolves to Windows .NET Framework System.Management; no System.CodeDom dependency on this framework."}
+  ]
+}

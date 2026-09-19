@@ -1,11 +1,9 @@
+import { MIN_PROBABILITY, MIN_CONFIDENCE } from '../automation/decision-policy.mjs';
+
 const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const APPS = ['chrome', 'happ'];
 const OPERATIONS = ['minimize', 'close'];
-// User-selected provisional probability 85%, with confidence 80% unchanged.
-// Neither threshold guarantees accuracy or replaces the executor's gates.
-const MIN_CONFIDENCE = 0.8;
-const MIN_PROBABILITY = 0.85;
 
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
 function inputError() { return failure('DESKTOP_INPUT', 'Некорректное состояние окон или команда.'); }

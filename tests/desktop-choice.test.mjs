@@ -60,12 +60,12 @@ test('done, unsupported and uncertain selections have no executable action', asy
   for (const choice of ['done', 'unsupported']) assert.equal((await choose(input, payload(input, choice))).action, null);
   assert.equal((await choose(input, payload(input, 'w0_minimize', 0.79))).action, null);
   const uncertain = payload(input, 'w0_minimize');
-  uncertain.answers.next_action.probabilities.w0_minimize = 0.84;
-  uncertain.answers.next_action.probabilities.unsupported = 0.16;
+  uncertain.answers.next_action.probabilities.w0_minimize = 0.79;
+  uncertain.answers.next_action.probabilities.unsupported = 0.21;
   assert.equal((await choose(input, uncertain)).action, null);
   const boundary = payload(input, 'w0_minimize', 0.8);
-  boundary.answers.next_action.probabilities.w0_minimize = 0.85;
-  boundary.answers.next_action.probabilities.unsupported = 0.15;
+  boundary.answers.next_action.probabilities.w0_minimize = 0.8;
+  boundary.answers.next_action.probabilities.unsupported = 0.2;
   assert.deepEqual((await choose(input, boundary)).action, { windowId: 'chrome-1', appId: 'chrome', operation: 'minimize' });
 });
 
