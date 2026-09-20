@@ -34,7 +34,6 @@ export class UnifiedCommands {
       const intent=mode==='auto'?parseCommand(command,this.now()/1000):null;
       this.route=mode==='chat'?'chat':mode==='desktop'?'desktop':localKinds.has(intent.kind)?'local':question.test(command)?'chat':'desktop';
       if(this.route==='desktop'){
-        if(signal.aborted)throw fail('ABORTED');
         // WindowsDesktop owns its own journal and its exact result contract.
         return await this.desktop.run({command,signal});
       }

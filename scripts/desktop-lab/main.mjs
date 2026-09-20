@@ -55,7 +55,7 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
     commands=new UnifiedCommands({desktop:lab,store,chat:(text,options)=>gateway.chat(text,options),progress,directory:paths.logs});
     voice=new VoiceSession({paths,encoder:new Mp3Encoder({executablePath:paths.ffmpeg}),gateway,
       denis:new DenisVoice({executablePath:paths.piper,modelPath:paths.denis}),commands,getSettings:()=>settings,emit:voiceEvent});
-    window=new BrowserWindow({width:1100,height:900,minWidth:760,minHeight:620,title:'Assistant Jeff',icon:path.join(root,'desktop','assets','icon.png'),
+    window=new BrowserWindow({width:1100,height:800,minWidth:760,minHeight:620,title:'Assistant Jeff',icon:path.join(root,'desktop','assets','icon.png'),
       webPreferences:{preload:fileURLToPath(new URL('./preload.cjs',import.meta.url)),contextIsolation:true,nodeIntegration:false,sandbox:true,backgroundThrottling:false}});
     window.removeMenu();
     window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
@@ -63,14 +63,15 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
     window.webContents.session.setPermissionRequestHandler((contents,permission,callback,details)=>callback(contents===window.webContents&&permission==='media'&&allowCapture&&details.isMainFrame===true&&Array.isArray(details.mediaTypes)&&details.mediaTypes.length>0&&details.mediaTypes.every(type=>type==='audio')));
     window.webContents.session.setPermissionCheckHandler((contents,permission,_origin,details)=>contents===window.webContents&&permission==='media'&&allowCapture&&details.isMainFrame===true&&details.mediaType==='audio');
     for(const [name,handler] of Object.entries({start:()=>lab.start(),state:()=>lab.state(),
-      run:async payload=>{if(voice.busy)throw Object.assign(new Error(),{code:'VOICE_BUSY'});if(voice.state==='waiting')await voice.stop();return commands.run(payload);},
+      run:payload=>voice.runTyped(payload),
       stop:()=>{commands.stop();return voice.stop();},
       history:()=>listRuns({directory:paths.logs,activeRunId:commands.activeRunId??lab.activeRunId}),
       readRun:payload=>readRun(payload?.runId,{directory:paths.logs,activeRunId:commands.activeRunId??lab.activeRunId}),
       openLogs:async()=>{fs.mkdirSync(paths.logs,{recursive:true});const error=await shell.openPath(paths.logs);return error?{error:'LOG_DIRECTORY_OPEN_FAILED'}:{opened:true};},
-      voiceStatus:()=>voice.status(),voiceStart:async payload=>{const result=await voice.start(payload);allowCapture=result.ok===true;return result;},
+      voiceStatus:async()=>({...await voice.status(),version:app.getVersion()}),voiceStart:async payload=>{const result=await voice.start(payload);allowCapture=result.ok===true;return result;},
       voiceStop:()=>{allowCapture=false;return voice.stop();},voiceActivate:()=>voice.activate(),voiceFinish:()=>voice.finish(),
-      voiceSettings:patch=>{settings=saveVoiceSettings(paths,patch,settings);return {ok:true,settings};},speechEnded:payload=>voice.speechEnded(payload)}))register(name,handler);
+      voiceSettings:patch=>{settings=saveVoiceSettings(paths,patch,settings);return {ok:true,settings};},speechEnded:payload=>voice.speechEnded(payload),
+      dismissReminder:payload=>{if(!Number.isSafeInteger(payload?.id)||payload.id<=0)throw Object.assign(new Error(),{code:'INVALID_REMINDER_ID'});store.completeReminder(payload.id);return {ok:true,id:payload.id};}}))register(name,handler);
     ipcMain.on('lab:audio',(event,pcm)=>{if(validSender(event)&&allowCapture&&pcm instanceof Int16Array&&pcm.length===1280)voice.accept(pcm);});
     await window.loadFile(fileURLToPath(new URL('./lab.html',import.meta.url)));
     app.setAppUserModelId('ai.nnfall.assistant-jeff');

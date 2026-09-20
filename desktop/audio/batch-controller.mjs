@@ -5,13 +5,13 @@ const MAX_PENDING_WAKE_FRAMES = 6;
 
 /** Owns batch voice state, not a microphone. Only a finished utterance reaches the cloud. */
 export class BatchVoiceController {
-  constructor({ createWake, encodeMp3, transcribe, onTranscript = async () => {},
+  constructor({ createWake, encodeMp3, transcribe, onTranscript = async () => {}, onNotice = async () => {},
     emit = () => {}, getSettings = () => ({}) } = {}) {
     if (typeof encodeMp3 !== 'function' || typeof transcribe !== 'function') {
       throw new TypeError('encodeMp3 and transcribe are required');
     }
     this.createWake = createWake ?? (async options => (await import('./wake.mjs')).WakeDetector.create(options));
-    Object.assign(this, { encodeMp3, transcribe, onTranscript, emit, getSettings });
+    Object.assign(this, { encodeMp3, transcribe, onTranscript, onNotice, emit, getSettings });
     this.state = 'stopped';
     this.generation = 0;
     this.ring = new SampleRing();
@@ -28,6 +28,11 @@ export class BatchVoiceController {
   status(state, message, metadata = {}) {
     this.state = state;
     this.emit({ type: 'status', state, message, ...metadata });
+  }
+
+  async notice(code, message, metadata = {}) {
+    this.status('ready', message, { ...metadata, code });
+    await this.onNotice(code, { ...metadata, signal: this.abort?.signal });
   }
 
   clearWaiting() {
@@ -64,7 +69,8 @@ export class BatchVoiceController {
             this.recorder?.clear();
             this.recorder = null;
             this.clearWaiting();
-            this.status('error', 'Не удалось загрузить локальное распознавание имени.', { code: 'WAKE_LOAD_FAILED' });
+            await this.notice('WAKE_LOAD_FAILED', 'Не удалось загрузить локальное распознавание имени.');
+            if (generation === this.generation) this.status('error', 'Не удалось загрузить локальное распознавание имени.', { code: 'WAKE_LOAD_FAILED' });
           }
           return this.snapshot();
         }
@@ -79,7 +85,7 @@ export class BatchVoiceController {
     finally { if (this.starting === loading) this.starting = null; }
   }
 
-  stop() {
+  stop({ message = 'Микрофон выключен.', metadata = {} } = {}) {
     if (this.stopping) return this.stopping;
     ++this.generation;
     this.running = false;
@@ -89,7 +95,7 @@ export class BatchVoiceController {
     this.recorder = null;
     this.activePcm?.fill(0);
     this.activePcm = null;
-    this.status('stopped', 'Микрофон выключен.');
+    this.status('stopped', message, metadata);
     const wake = this.wake;
     this.wake = null;
     const pending = [this.inference, this.starting].filter(Boolean);
@@ -168,10 +174,11 @@ export class BatchVoiceController {
           return;
         }
       }
-    })().catch(() => {
+    })().catch(async () => {
       if (generation === this.generation) {
         this.clearWaiting();
-        this.status('error', 'Ошибка локального распознавания имени.', { code: 'WAKE_INFERENCE_FAILED' });
+        await this.notice('WAKE_INFERENCE_FAILED', 'Ошибка локального распознавания имени.');
+        if (generation === this.generation) this.status('error', 'Ошибка локального распознавания имени.', { code: 'WAKE_INFERENCE_FAILED' });
       }
     });
     this.inference = inference;
@@ -191,7 +198,7 @@ export class BatchVoiceController {
     const metadata = recorder.end();
     const pcm = recorder.take();
     if (!pcm) {
-      this.status('ready', 'Речь не обнаружена.', metadata);
+      await this.notice('NO_SPEECH', 'Речь не обнаружена.', metadata);
       await this.resume(generation);
       return false;
     }
@@ -200,7 +207,8 @@ export class BatchVoiceController {
     const autoExecute = settings.voiceAutoExecute ?? settings.autoExecute ?? true;
     if (settings.cloudEnabled === false) {
       pcm.fill(0);
-      this.status('error', 'Облачное распознавание выключено в настройках.', { code: 'CLOUD_DISABLED', ...metadata });
+      await this.notice('CLOUD_DISABLED', 'Облачное распознавание выключено в настройках.', metadata);
+      if (generation === this.generation) this.status('error', 'Облачное распознавание выключено в настройках.', { code: 'CLOUD_DISABLED', ...metadata });
       return false;
     }
     this.activePcm = pcm;
@@ -213,8 +221,8 @@ export class BatchVoiceController {
       if (generation !== this.generation || signal.aborted) return false;
       const text = stripWakePrefix(typeof result === 'string' ? result : result?.text ?? result?.transcript);
       if (!text || text.length > 1024) {
-        this.status('ready', !text ? 'Команда не распознана.' : 'Команда слишком длинная. Максимум 1024 символа.',
-          { ...metadata, code: !text ? 'EMPTY_TRANSCRIPT' : 'TRANSCRIPT_TOO_LONG' });
+        await this.notice(!text ? 'EMPTY_TRANSCRIPT' : 'TRANSCRIPT_TOO_LONG',
+          !text ? 'Команда не распознана.' : 'Команда слишком длинная. Максимум 1024 символа.', metadata);
         await this.resume(generation);
         return false;
       }
@@ -226,14 +234,20 @@ export class BatchVoiceController {
       // Root may include execution and TTS in this promise. Waiting resumes only afterwards.
       await this.onTranscript(text, { signal, autoExecute, ...metadata });
       if (generation !== this.generation || signal.aborted) return false;
+      if (!autoExecute) {
+        // Review is deliberate user input time: release capture and the wake
+        // detector so a second utterance cannot replace the text being edited.
+        await this.stop({ message: 'Проверьте текст и нажмите «Выполнить». Микрофон выключен.',
+          metadata: { review: true, autoExecute: false } });
+        return true;
+      }
       await this.resume(generation);
       return true;
     } catch (error) {
       if (generation === this.generation && !signal.aborted) {
-        this.status('error', 'Не удалось обработать голосовую команду.', {
-          code: typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,79}$/.test(error.code)
-            ? error.code : 'VOICE_PROCESSING_FAILED', ...metadata,
-        });
+        const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,79}$/.test(error.code) ? error.code : 'VOICE_PROCESSING_FAILED';
+        await this.notice(code, 'Не удалось обработать голосовую команду.', metadata);
+        if (generation === this.generation) this.status('error', 'Не удалось обработать голосовую команду.', { code, ...metadata });
       }
       return false;
     } finally {
@@ -248,7 +262,8 @@ export class BatchVoiceController {
     this.clearWaiting();
     try { this.wake?.reset(); }
     catch {
-      this.status('error', 'Не удалось перезапустить распознавание имени.', { code: 'WAKE_RESET_FAILED' });
+      await this.notice('WAKE_RESET_FAILED', 'Не удалось перезапустить распознавание имени.');
+      if (generation === this.generation) this.status('error', 'Не удалось перезапустить распознавание имени.', { code: 'WAKE_RESET_FAILED' });
       return;
     }
     this.status('waiting', this.config.manual ? 'Готов к записи команды.' : 'Ожидаю имя Jarvis.');

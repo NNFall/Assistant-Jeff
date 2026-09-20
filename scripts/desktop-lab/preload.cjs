@@ -27,6 +27,10 @@ contextBridge.exposeInMainWorld('lab', {
   voiceSettings: patch => ipcRenderer.invoke('lab:voiceSettings', patch),
   audioChunk: pcm => { if (pcm instanceof Int16Array && pcm.length === 1280) ipcRenderer.send('lab:audio', pcm); },
   speechEnded: request => ipcRenderer.invoke('lab:speechEnded', { id: typeof request?.id === 'string' ? request.id.slice(0,64) : '' }),
+  dismissReminder: request => {
+    if (!Number.isSafeInteger(request?.id) || request.id <= 0) return Promise.reject(new Error('Некорректное напоминание.'));
+    return ipcRenderer.invoke('lab:dismissReminder', { id: request.id });
+  },
   onVoiceEvent: callback => {
     if (typeof callback !== 'function') throw new TypeError('Expected a callback');
     const listener = (_event, data) => callback(data);

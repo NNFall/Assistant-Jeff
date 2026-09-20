@@ -2,6 +2,7 @@ import {appendFile,mkdir,writeFile,readFile,readdir,rename,stat} from 'node:fs/p
 import {randomUUID} from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {describeResult} from '../../desktop/automation/feedback.mjs';
 
 export const LOG_DIRECTORY=fileURLToPath(new URL('../../work/desktop-lab/runs/',import.meta.url));
 const MAX_BYTES=8*1024*1024;
@@ -58,6 +59,6 @@ export async function listRuns({directory=LOG_DIRECTORY,activeRunId}={}){
   await mkdir(directory,{recursive:true});
   const names=(await readdir(directory)).filter(name=>name.endsWith('.json')&&validId(name.slice(0,-5))).sort().reverse().slice(0,20);
   const runs=[];
-  for(const name of names){try{const r=await readRun(name.slice(0,-5),{directory,activeRunId});runs.push({runId:r.runId,createdAt:r.createdAt,command:r.command,status:r.status,ok:r.ok,reason:r.reason,elapsedMs:r.elapsedMs});}catch{runs.push({runId:name.slice(0,-5),ok:false,reason:'LOG_READ_FAILED'});}}
+  for(const name of names){try{const r=await readRun(name.slice(0,-5),{directory,activeRunId});const {tone,title}=describeResult(r);runs.push({runId:r.runId,createdAt:r.createdAt,command:r.command,status:r.status,ok:r.ok,reason:r.reason,elapsedMs:r.elapsedMs,feedback:{tone,title}});}catch{runs.push({runId:name.slice(0,-5),ok:false,reason:'LOG_READ_FAILED'});}}
   return {runs};
 }

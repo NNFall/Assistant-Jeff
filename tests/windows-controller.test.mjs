@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
+import {getEventListeners} from 'node:events';
 import {WindowsDesktop} from '../scripts/windows-desktop/controller.mjs';
 import {RunJournal} from '../scripts/desktop-lab/journal.mjs';
 
@@ -20,7 +21,7 @@ const done=overrides=>({choice:'done',actionId:null,probability:0.97,confidence:
 const nativeError=code=>Object.assign(new Error(code),{code});
 const receipt=(args,after,overrides={})=>({operation:args.operation,targetId:args.targetId,verified:true,stateChanged:false,evidence:'window_minimized',after,...overrides});
 
-async function setup(t,{snapshots=[snapshot(1)],execute,choose=async()=>done(),journalFactory,...options}={}){
+async function setup(t,{snapshots=[snapshot(1)],execute,choose=async()=>done(),journalFactory,progress=()=>{},...options}={}){
   const directory=await mkdtemp(path.join(tmpdir(),'jeff-windows-controller-'));
   t.after(()=>rm(directory,{recursive:true,force:true}));
   const calls=[];let observed=0;
@@ -34,7 +35,7 @@ async function setup(t,{snapshots=[snapshot(1)],execute,choose=async()=>done(),j
     close(){},
   };
   const apps={list:async()=>[],launch:async()=>{assert.fail('unexpected installed application launch');}};
-  const desktop=new WindowsDesktop(()=>{},{bridge,apps,choose,directory,apiKeyResolver:async()=>'synthetic-local-test-key',...(journalFactory?{journalFactory}:{}),...options});
+  const desktop=new WindowsDesktop(progress,{bridge,apps,choose,directory,apiKeyResolver:async()=>'synthetic-local-test-key',...(journalFactory?{journalFactory}:{}),...options});
   t.after(()=>desktop.dispose());
   return {desktop,calls,directory,observations:()=>observed};
 }
@@ -166,6 +167,35 @@ test('native result must match the exact operation and target',async t=>{
     const ctx=await setup(t,{choose:async input=>action(input),execute:async args=>receipt(args,snapshot(2),mismatch)});
     const report=await ctx.desktop.run({command:'Сверни Editor'});
     assert.equal(report.reason,'execution_uncertain');assert.equal(report.ok,false);assert.equal(report.completed.length,0);
+    assert.equal(report.executionUncertain,true);
+    assert.equal((await ctx.desktop.readRun({runId:report.runId})).executionUncertain,true);
+  }
+});
+
+test('a missing receipt or missing post-effect snapshot never resolves dispatch uncertainty',async t=>{
+  for(const output of [null,{verified:true,stateChanged:false,evidence:'window_minimized',after:null}]){
+    const ctx=await setup(t,{choose:async input=>action(input),execute:async args=>output?{operation:args.operation,targetId:args.targetId,...output}:null});
+    const report=await ctx.desktop.run({command:'Сверни Editor'});
+    assert.equal(report.reason,'execution_uncertain');assert.equal(report.executionUncertain,true);assert.equal(report.ok,false);
+    assert.equal(report.completed.length,0);assert.equal(ctx.calls.filter(c=>c.method==='execute').length,1);
+  }
+});
+
+test('native rejection that explicitly precedes the effect has no execution uncertainty',async t=>{
+  const ctx=await setup(t,{choose:async input=>action(input),execute:async()=>{throw Object.assign(nativeError('UIA_REQUEST_FAILED'),{details:{stage:'resolve',effectAttempted:false}});}});
+  const report=await ctx.desktop.run({command:'Сверни Editor'});
+  assert.equal(report.reason,'UIA_REQUEST_FAILED');assert.equal(report.executionUncertain,false);
+  assert.equal(report.errorDetails.effectAttempted,false);assert.equal(ctx.calls.filter(c=>c.method==='execute').length,1);
+});
+
+test('stale-looking failures after an attempted effect stop without replan or replay',async t=>{
+  for(const failure of [Object.assign(nativeError('STALE_SNAPSHOT'),{details:{effectAttempted:true}}),nativeError('UIA_CHANGED_AFTER_APPLY')]){
+    let choices=0;
+    const ctx=await setup(t,{choose:async input=>{choices++;return action(input);},execute:async()=>{throw failure;}});
+    const report=await ctx.desktop.run({command:'Сверни Editor'});
+    assert.equal(report.reason,failure.code);assert.equal(report.executionUncertain,true);assert.equal(report.ok,false);
+    assert.equal(choices,1);assert.equal(ctx.calls.filter(c=>c.method==='execute').length,1);
+    assert.equal(report.trace.some(event=>event.phase==='stale'),false);
   }
 });
 
@@ -205,6 +235,53 @@ test('journal failure before execute_request prevents the operating system effec
   const report=await ctx.desktop.run({command:'Сверни Editor'});
   assert.equal(report.reason,'LOG_WRITE_FAILED');assert.equal(report.ok,false);
   assert.equal(ctx.calls.some(c=>c.method==='execute'),false);assert.equal(ctx.desktop.running,false);
+});
+
+test('throwing or asynchronously rejected progress notifications cannot change results or leave a running journal',async t=>{
+  for(const progress of [()=>{throw new Error('UI subscriber failed');},()=>Promise.reject(new Error('Async UI subscriber failed'))]){
+    const before=snapshot(1),after=snapshot(2,{minimized:true});let choices=0;
+    const ctx=await setup(t,{progress,snapshots:[before,before,after,after],choose:async input=>choices++===0?action(input):done(),execute:async args=>receipt(args,after)});
+    const report=await ctx.desktop.run({command:'Сверни Editor'});
+    assert.equal(report.ok,true);assert.equal(report.reason,'goal_verified');assert.equal(report.completed.length,1);
+    assert.equal(report.executionUncertain,false);
+    const stored=await ctx.desktop.readRun({runId:report.runId});
+    assert.equal(stored.status,'finished');assert.equal(stored.reason,'goal_verified');assert.equal(stored.events.at(-1).phase,'result');
+  }
+});
+
+test('verified effects remain recorded if a subsequent journal write fails',async t=>{
+  const journalFactory=async(command,options)=>{
+    const journal=await RunJournal.create(command,options),record=journal.record.bind(journal);
+    journal.record=(phase,data)=>phase==='verify'?Promise.reject(nativeError('LOG_WRITE_FAILED')):record(phase,data);
+    return journal;
+  };
+  const ctx=await setup(t,{journalFactory,choose:async input=>action(input),execute:async args=>receipt(args,snapshot(2,{minimized:true}))});
+  const report=await ctx.desktop.run({command:'Сверни Editor'});
+  assert.equal(report.ok,false);assert.equal(report.reason,'LOG_WRITE_FAILED');assert.equal(report.executionUncertain,false);
+  assert.equal(report.completed.length,1);assert.equal(report.completed[0].outcome,'verified');
+});
+
+test('pre-aborted external signal writes a normal stopped report before key discovery or observation',async t=>{
+  const external=new AbortController();external.abort('user_stop');
+  const ctx=await setup(t,{apiKeyResolver:async()=>assert.fail('must not resolve a key for a cancelled run'),choose:async()=>assert.fail('no inference')});
+  const report=await ctx.desktop.run({command:'Сверни Editor',signal:external.signal});
+  assert.equal(report.reason,'aborted');assert.equal(report.ok,false);assert.equal(report.executionUncertain,false);
+  assert.equal(ctx.calls.length,0);assert.equal(ctx.desktop.running,false);
+  assert.equal((await ctx.desktop.readRun({runId:report.runId})).status,'finished');
+  assert.equal(getEventListeners(external.signal,'abort').length,0);
+});
+
+test('external abort reaches in-flight inference and its listener is detached after any completed run',async t=>{
+  const external=new AbortController();let entered;
+  const started=new Promise(resolve=>{entered=resolve;});
+  const ctx=await setup(t,{choose:async(_input,{signal})=>new Promise((resolve,reject)=>{signal.addEventListener('abort',()=>reject(nativeError('ABORTED')),{once:true});entered();})});
+  const pending=ctx.desktop.run({command:'Сверни Editor',signal:external.signal});
+  await started;external.abort();const report=await pending;
+  assert.equal(report.reason,'aborted');assert.equal(report.executionUncertain,false);assert.equal(ctx.calls.some(c=>c.method==='execute'),false);
+  assert.equal(getEventListeners(external.signal,'abort').length,0);
+  const unused=new AbortController(),successful=await setup(t);
+  assert.equal((await successful.desktop.run({command:'Сверни Editor',signal:unused.signal})).ok,true);
+  assert.equal(getEventListeners(unused.signal,'abort').length,0);
 });
 
 test('stop aborts in-flight inference and records a stopped result without effects',async t=>{
@@ -266,9 +343,12 @@ test('malformed snapshots and malformed receipt snapshots stop safely',async t=>
   const initial=await setup(t,{snapshots:[{version:'bad',windows:[],elements:[]}],choose:async()=>{assert.fail('must reject before inference');}});
   const badInitial=await initial.desktop.run({command:'Сверни Editor'});
   assert.equal(badInitial.reason,'WINDOWS_INVALID_SNAPSHOT');assert.equal(initial.calls.some(c=>c.method==='execute'),false);
+  assert.equal(badInitial.executionUncertain,false);
   const after=await setup(t,{choose:async input=>action(input),execute:async args=>receipt(args,{version:'bad',windows:[],elements:[]})});
   const badAfter=await after.desktop.run({command:'Сверни Editor'});
   assert.equal(badAfter.reason,'WINDOWS_INVALID_SNAPSHOT');assert.equal(badAfter.completed.length,0);assert.equal(badAfter.ok,false);
+  assert.equal(badAfter.executionUncertain,true);
+  assert.equal((await after.desktop.readRun({runId:badAfter.runId})).executionUncertain,true);
 });
 
 test('unsupported advances candidate pages so later real controls can be selected',async t=>{
@@ -342,6 +422,7 @@ test('an unrelated new process with a matching title cannot verify the requested
   const report=await ctx.desktop.run({command:'Открой Music Player'});
   assert.equal(report.ok,false);assert.equal(report.reason,'not_verified');assert.equal(launches,1);assert.equal(choices,1);
   assert.equal(report.completed.length,0);
+  assert.equal(report.executionUncertain,true);
   const result=report.trace.find(e=>e.phase==='execute_result').receipt;
   assert.equal(result.verified,false);assert.equal(result.stateChanged,false);assert.equal(result.evidence,'process_started_window_not_observed');
 });
@@ -353,8 +434,23 @@ test('a spawned process without an observed new window stops unverified without 
   const report=await ctx.desktop.run({command:'Открой Music Player'});
   assert.equal(report.ok,false);assert.equal(report.reason,'not_verified');assert.equal(launches,1);assert.equal(choices,1);
   assert.equal(report.completed.length,0);assert.equal(ctx.calls.some(c=>c.method==='execute'),false);
+  assert.equal(report.executionUncertain,true);
   const result=report.trace.find(e=>e.phase==='execute_result').receipt;
   assert.equal(result.verified,false);assert.equal(result.stateChanged,false);assert.equal(result.evidence,'process_started_window_not_observed');
+});
+
+test('a read-only observation error after a known process spawn cannot clear effect uncertainty',async t=>{
+  let launches=0,observations=0,choices=0;
+  const apps={list:async()=>[installedMusic],launch:async()=>{launches++;return {pid:4242,name:installedMusic.name,processName:installedMusic.processName};}};
+  const bridge={close(){},request:async(method)=>{
+    assert.equal(method,'observe');
+    if(++observations<=2)return snapshot(1);
+    throw Object.assign(nativeError('UIA_REQUEST_FAILED'),{details:{stage:'observe',effectAttempted:false}});
+  }};
+  const ctx=await setup(t,{bridge,apps,choose:async input=>{choices++;return action(input,'launch');}});
+  const report=await ctx.desktop.run({command:'Открой Music Player'});
+  assert.equal(report.reason,'UIA_REQUEST_FAILED');assert.equal(report.ok,false);assert.equal(report.executionUncertain,true);
+  assert.equal(report.errorDetails.effectAttempted,true);assert.equal(launches,1);assert.equal(choices,1);
 });
 
 test('unknown launch action IDs never reach installed-app launcher',async t=>{

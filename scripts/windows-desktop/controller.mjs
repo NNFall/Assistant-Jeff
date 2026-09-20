@@ -14,6 +14,8 @@ const error=code=>Object.assign(new Error(code),{code});
 const commandValid=value=>typeof value==='string'&&value.trim().length>0&&value.length<=1024&&!/[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(value);
 const strong=(p,c)=>Number.isFinite(p)&&p>=MIN_PROBABILITY&&p<=1&&Number.isFinite(c)&&c>=MIN_CONFIDENCE&&c<=1;
 const safeCode=value=>/^[A-Z_]{1,64}$/.test(value??'')?value:'WINDOWS_ERROR';
+// These native/catalog errors are emitted by the current adapters before effects.
+const preEffectStale=new Set(['STALE_SNAPSHOT','TARGET_IDENTITY_CHANGED','ELEMENT_IDENTITY_CHANGED','FOCUSED_EDIT_CHANGED','APP_TARGET_CHANGED']);
 
 export class WindowsDesktop {
   constructor(progress=()=>{},{bridge=new WindowsBridge(),apps=new InstalledApps(),choose=chooseWindowsAction,directory=WINDOWS_LOG_DIRECTORY,apiKeyResolver=async()=>process.env.TYPESAFE_API_KEY||await readProtected(path.join(root,'data','secrets','typesafe.dpapi')),journalFactory=RunJournal.create,maxSteps=20,maxDurationMs=90000}={}){
@@ -29,29 +31,37 @@ export class WindowsDesktop {
   dispose(){this.stop();this.bridge.close();}
   async launch(candidate,before,signal){
     const launched=await this.apps.launch(candidate.targetId,signal);
-    let after,found;
-    const previous=new Set(before.windows.map(w=>w.id));
-    for(let attempt=0;attempt<10;attempt++){
-      if(signal.aborted)throw error('ABORTED');
-      after=validateWindowsSnapshot(await this.bridge.request('observe',{windowId:null},signal));this.lastSnapshot=after;
-      found=after.windows.find(w=>!previous.has(w.id)&&(w.processId===launched.pid||w.processName.toLocaleLowerCase()===launched.processName.toLocaleLowerCase()));
-      if(found)break;
-      await new Promise(resolve=>setTimeout(resolve,250));
+    try{
+      let after,found;
+      const previous=new Set(before.windows.map(w=>w.id));
+      for(let attempt=0;attempt<10;attempt++){
+        if(signal.aborted)throw error('ABORTED');
+        after=validateWindowsSnapshot(await this.bridge.request('observe',{windowId:null},signal));this.lastSnapshot=after;
+        found=after.windows.find(w=>!previous.has(w.id)&&(w.processId===launched.pid||w.processName.toLocaleLowerCase()===launched.processName.toLocaleLowerCase()));
+        if(found)break;
+        await new Promise(resolve=>setTimeout(resolve,250));
+      }
+      return {operation:'launch',targetId:candidate.targetId,before,after,verified:!!found&&found.processId===launched.pid,stateChanged:!!found,effectAttempted:true,
+        evidence:found?(found.processId===launched.pid?'launched_process_window_observed':'matching_application_window_observed'):'process_started_window_not_observed',launched:{pid:launched.pid,name:launched.name}};
+    }catch(e){
+      // A later read-only observation failure must not erase the process spawn.
+      throw Object.assign(error(safeCode(e.code)),{details:{...e.details,effectAttempted:true}});
     }
-    return {operation:'launch',targetId:candidate.targetId,before,after,verified:!!found&&found.processId===launched.pid,stateChanged:!!found,
-      evidence:found?(found.processId===launched.pid?'launched_process_window_observed':'matching_application_window_observed'):'process_started_window_not_observed',launched:{pid:launched.pid,name:launched.name}};
   }
-  async run({command}={}){
+  async run({command,signal:externalSignal}={}){
     if(this.running)throw error('TASK_ALREADY_RUNNING');
     if(!commandValid(command))throw error('INVALID_COMMAND');
-    command=command.trim();this.running=true;this.abort=new AbortController();
-    const signal=this.abort.signal;const started=performance.now();const timer=setTimeout(()=>this.abort?.abort('time_limit'),this.maxDurationMs);
-    const report={mode:'REAL_WINDOWS_DESKTOP',command,createdAt:new Date().toISOString(),ok:false,reason:'step_limit',calls:[],trace:[],completed:[],goal:command};
+    command=command.trim();this.running=true;const abort=this.abort=new AbortController();
+    const cancel=()=>abort.abort(externalSignal.reason==='time_limit'?'time_limit':'user_stop');
+    externalSignal?.addEventListener('abort',cancel,{once:true});if(externalSignal?.aborted)cancel();
+    const signal=abort.signal;const started=performance.now();const timer=setTimeout(()=>abort.abort('time_limit'),this.maxDurationMs);
+    const report={mode:'REAL_WINDOWS_DESKTOP',command,createdAt:new Date().toISOString(),ok:false,reason:'step_limit',calls:[],trace:[],completed:[],goal:command,executionUncertain:false};
     let journal,finishing=false,inFlightEffect=false;
     const gate=()=>{if(signal.aborted)throw error('ABORTED');};
-    const event=async(phase,data={})=>{if(finishing&&phase!=='result')return;const item=await journal.record(phase,data);report.trace.push(item);this.progress(item);return item;};
+    const event=async(phase,data={})=>{if(finishing&&phase!=='result')return;const item=await journal.record(phase,data);report.trace.push(item);try{Promise.resolve(this.progress(item)).catch(()=>{});}catch{}return item;};
     try{
       journal=await this.journalFactory(command,{directory:this.directory});this.activeRunId=journal.runId;report.runId=journal.runId;report.logPath=journal.jsonPath;
+      gate();
       await event('desktop_start',{message:'Получаем реальные окна Windows.',logPath:report.logPath});
       const apiKey=await this.apiKeyResolver();gate();if(!apiKey)throw error('TYPESAFE_KEY_MISSING');
       let installed=[];
@@ -101,21 +111,32 @@ export class WindowsDesktop {
         const execution={targetId:candidate.targetId,operation:candidate.operation,...(candidate.args??{}),expectedVersion:fresh.version,...(expectedWindowVersion?{expectedWindowVersion}:{})};
         await event('execute_request',{step,candidate,...execution,message:candidate.label});gate();
         let receipt;
-        try{inFlightEffect=candidate.operation!=='inspect';receipt=candidate.operation==='launch'?await this.launch(candidate,fresh,signal):await this.bridge.request('execute',execution,signal);inFlightEffect=false;}
-        catch(e){if(/STALE|CHANGED/.test(e.code??'')){inFlightEffect=false;await event('stale',{step,code:safeCode(e.code),message:'Исполнитель отклонил устаревшее состояние.'});page=0;continue;}throw e;}
+        try{inFlightEffect=candidate.operation!=='inspect';receipt=candidate.operation==='launch'?await this.launch(candidate,fresh,signal):await this.bridge.request('execute',execution,signal);}
+        catch(e){
+          if(e.details?.effectAttempted===false)inFlightEffect=false;
+          if(preEffectStale.has(e.code)&&e.details?.effectAttempted!==true){inFlightEffect=false;await event('stale',{step,code:safeCode(e.code),message:'Исполнитель отклонил устаревшее состояние.'});page=0;continue;}
+          throw e;
+        }
         await event('execute_result',{step,receipt,message:'Действие передано Windows; проверяем наблюдаемый результат.'});
-        if(!receipt||receipt.operation!==candidate.operation||receipt.targetId!==candidate.targetId){report.reason='execution_uncertain';break;}
+        if(!receipt||receipt.operation!==candidate.operation||receipt.targetId!==candidate.targetId){report.reason='execution_uncertain';report.executionUncertain=inFlightEffect;break;}
+        if(receipt.effectAttempted===false)inFlightEffect=false;
         if(receipt.after)report.final=this.lastSnapshot=validateWindowsSnapshot(receipt.after);
         const outcome=receipt.verified===true?'verified':receipt.stateChanged===true?'observed_change':null;
+        if(outcome&&!receipt.after){report.reason='execution_uncertain';report.executionUncertain=inFlightEffect;break;}
+        if(!outcome)report.executionUncertain=inFlightEffect;
+        else report.completed.push({id:candidate.id,label:candidate.label,outcome,evidence:String(receipt.evidence??'').slice(0,1500),targetId:candidate.targetId,operation:candidate.operation});
+        // Only a matched receipt and validated post-effect snapshot resolve the
+        // dispatch. Known completed effects remain visible if later logging fails.
+        inFlightEffect=false;
         await event('verify',{step,outcome:outcome??'not_verified',evidence:receipt.evidence,message:outcome==='verified'?'Эффект подтверждён состоянием Windows.':outcome==='observed_change'?'Интерфейс изменился; конечную цель ещё нужно проверить.':receipt.evidence==='foreground_not_granted'?'Windows не разрешила вывести окно на передний план; выполнение остановлено.':'Результат действия не подтверждён.'});
+        gate();
         if(!outcome){report.reason='not_verified';break;}
-        report.completed.push({id:candidate.id,label:candidate.label,outcome,evidence:String(receipt.evidence??'').slice(0,1500),targetId:candidate.targetId,operation:candidate.operation});
         page=0;
       }
       return report;
-    }catch(e){report.ok=false;report.executionUncertain=inFlightEffect;if(e.details)report.errorDetails=e.details;report.reason=signal.aborted?(signal.reason==='time_limit'?'time_limit':'aborted'):safeCode(e.code);return report;}
+    }catch(e){report.ok=false;report.executionUncertain=report.executionUncertain||inFlightEffect;if(e.details)report.errorDetails=e.details;report.reason=signal.aborted?(signal.reason==='time_limit'?'time_limit':'aborted'):safeCode(e.code);return report;}
     finally{
-      finishing=true;clearTimeout(timer);report.elapsedMs=Math.round(performance.now()-started);
+      finishing=true;clearTimeout(timer);externalSignal?.removeEventListener('abort',cancel);report.elapsedMs=Math.round(performance.now()-started);
       if(journal)try{await event('result',{ok:report.ok,reason:report.reason,elapsedMs:report.elapsedMs,message:report.ok?'Выполнение завершено; результат записан.':`Остановка: ${report.reason}`});report.events=journal.events;await journal.finish(report);}catch{report.ok=false;report.reason='LOG_WRITE_FAILED';report.events=journal.events;}
       Object.assign(report,redact(report));this.running=false;this.abort=null;this.activeRunId=null;
     }

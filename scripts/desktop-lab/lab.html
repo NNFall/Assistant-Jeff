@@ -4,44 +4,112 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; connect-src 'none'; media-src 'self' blob:; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
-  <title>Jeff — управление Windows</title>
+  <title>Jeff — помощник</title>
   <link rel="stylesheet" href="lab.css">
   <script type="module" src="lab.js"></script>
 </head>
 <body>
-  <main>
-    <header><div><p class="eyebrow">РЕАЛЬНЫЙ КОМПЬЮТЕР</p><h1>Jeff — управление Windows</h1></div><span id="status" class="badge" role="status">Проверка состояния…</span></header>
-    <p class="intro">Напишите задачу для компьютера. Jeff запускает поддерживаемые программы из меню «Пуск», получает доступные окна и элементы Windows, выбирает действие и проверяет результат после каждого шага. Кнопка «Стоп» прерывает выполнение; запросы, решения и результаты сохраняются в журнале.</p>
-    <section class="voice-panel" aria-labelledby="voice-title">
-      <div class="section-heading"><h2 id="voice-title">Голос</h2><span id="voice-state" class="badge" role="status">Микрофон: выкл</span></div>
-      <div class="actions"><button id="voice-wake" type="button">Ожидать Jarvis</button><button id="voice-manual" type="button">Сказать команду</button><button id="voice-finish" type="button" disabled>Закончить</button></div>
-      <p id="voice-status" class="muted" role="status" aria-live="polite">Микрофон выключен. Включите ожидание Jarvis или запишите одну команду.</p>
-      <p id="voice-transcript" class="voice-transcript" aria-live="polite">Распознанная команда появится здесь.</p>
-      <p id="voice-metrics" class="muted" hidden></p>
-      <p id="voice-warning" class="voice-warning" role="status" hidden></p>
-      <p id="voice-reminder" class="reminder-notice" role="alert" hidden></p>
-      <div class="voice-settings"><label><input id="voice-beep" type="checkbox" checked> Сигнал активации</label><label><input id="voice-reply" type="checkbox" checked> Ответ голосом Дениса</label><label><input id="voice-auto" type="checkbox" checked> Выполнять после распознавания</label></div>
-      <p class="privacy">Пауза для завершения фразы — <span id="voice-silence">2,5 с</span>. Ожидание Jarvis работает локально. После включения подождите 2–3 секунды и произнесите «Hey Jarvis». В облако отправляется только записанная команда после активации словом Jarvis или кнопкой. Если автоматическое выполнение выключено, текст останется в поле для проверки.</p>
-      <p id="voice-error" class="error" role="alert" hidden></p>
-    </section>
-    <section class="controls" aria-labelledby="scenario-title">
-      <h2 id="scenario-title">Задача для компьютера</h2>
-      <div class="scenario-row"><label for="scenario">Пример команды</label><select id="scenario"><option value="custom">Своя команда</option><option value="chrome">Свернуть Google Chrome</option><option value="music">Яндекс Музыка на весь экран</option><option value="steam">Открыть Steam</option><option value="taskmgr">Открыть диспетчер задач</option><option value="tabs">Найти первую вкладку ВК</option><option value="note">Сохранить заметку</option><option value="reminder">Напомнить через 10 минут</option><option value="question">Задать вопрос Gemini</option></select><span class="threshold">Порог действия: P ≥ 0,80 · confidence ≥ 0,80</span></div>
-      <p id="goal" class="goal"></p>
-      <label for="command">Что нужно сделать?</label>
-      <textarea id="command" rows="3" maxlength="1024" spellcheck="false" aria-describedby="command-help privacy-help" placeholder="Сверни Google Chrome&#10;Разверни Яндекс Музыку на весь экран.&#10;Найди первую вкладку ВКонтакте в Яндекс Браузере"></textarea>
-      <div class="field-meta"><span id="command-help">Доступны поддерживаемые программы меню «Пуск» и встроенный диспетчер задач. Управление зависит от доступных UIA-элементов. Другие команды: «заметка: купить хлеб», «напомни через 10 минут проверить чай», «объясни, что такое оперативная память».</span><span id="counter">0 / 1024</span></div>
-      <div class="actions"><button id="run" type="button" class="primary">Выполнить</button><button id="stop" type="button" disabled>Стоп</button><button id="start" type="button">Обновить окна</button><button id="refresh" type="button" hidden>Обновить наблюдение</button><button id="history" type="button">Журнал</button></div>
-      <p id="activity" role="status" aria-live="polite">Введите задачу и нажмите «Выполнить».</p>
-      <p id="privacy-help" class="privacy">Во время выполнения задача, названия доступных программ, структура окон и названия элементов передаются модели Jev. Фонового отправления наблюдений нет. Изображение экрана модель не анализирует.</p>
-      <p id="error" class="error" role="alert" hidden></p>
-    </section>
-    <div class="workspace">
-      <section aria-labelledby="observation-title"><div class="section-heading"><h2 id="observation-title">Окна и доступные элементы</h2><span id="snapshot-version" class="muted">Нет снимка</span></div><p id="summary" class="muted">Нажмите «Обновить окна», чтобы получить текущее состояние компьютера.</p><ul id="windows" class="window-list" aria-label="Окна приложений"></ul><h3>Элементы управления</h3><ul id="elements" class="elements"></ul><details><summary>Факты и метаданные</summary><pre id="facts">Нет данных</pre></details></section>
-      <section aria-labelledby="result-title"><h2 id="result-title">Проверка результата</h2><p id="verification" class="verification" role="status">Ещё не выполнялась</p><p id="result-meta" class="muted"></p><p id="run-meta" class="muted"></p><h3>Цель</h3><p id="goal-status" class="muted">Задача ещё не выполнялась.</p><pre id="plan">Ваша команда появится здесь после запуска.</pre><h3>Ход выполнения</h3><div id="decisions" class="decisions"><p class="muted">Здесь будут фактические шаги и ответы модели.</p></div><details><summary>Полный отчёт и запросы модели</summary><pre id="trace">Нет данных</pre></details></section>
+  <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="icon-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7M5 9v11h5v-7h4v7h5V9"/></symbol>
+    <symbol id="icon-history" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 7h3m6 0h7M4 17h9m6 0h1"/><circle cx="10" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></symbol>
+    <symbol id="icon-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v3M9 21h6"/></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 4 12 8-12 8Z"/></symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.1"/></symbol>
+    <symbol id="icon-edit" viewBox="0 0 24 24"><path d="m15 4 5 5M4 20l1-6L16 3a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3L10 19Z"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.2 7a8 8 0 0 1 13-1l1.8 3M4 15l1.8 3a8 8 0 0 0 13-1"/></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h5l3 3h6a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></symbol>
+    <symbol id="icon-note" viewBox="0 0 24 24"><path d="M5 3h14v13l-5 5H5ZM14 21v-5h5M8 7h8M8 11h6"/></symbol>
+    <symbol id="icon-bell" viewBox="0 0 24 24"><path d="M4 17h16l-2-3V9a6 6 0 0 0-12 0v5ZM9 21h6"/></symbol>
+    <symbol id="icon-window" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M6 6.5h.1M9 6.5h.1"/></symbol>
+    <symbol id="icon-chat" viewBox="0 0 24 24"><path d="M5 3h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8l-5 3V5a2 2 0 0 1 2-2ZM7 8h10M7 12h7"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v5c0 5-4 8-8 10-4-2-8-5-8-10V6ZM8 11l3 3 5-5"/></symbol>
+  </svg>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <button class="brand" type="button" data-view="assistant" aria-label="Jeff — помощник"><svg class="brand-mark" viewBox="0 0 30 32" aria-hidden="true"><path d="M3 14v4M9 8v16M15 3v26M21 10v12M27 14v4"/></svg><span>Jeff</span></button>
+      <nav class="main-nav" aria-label="Разделы приложения">
+        <button type="button" data-view="assistant" aria-current="page" class="nav-button active"><svg class="icon" aria-hidden="true"><use href="#icon-home"/></svg><span>Помощник</span></button>
+        <button type="button" data-view="history" class="nav-button"><svg class="icon" aria-hidden="true"><use href="#icon-history"/></svg><span>История</span></button>
+        <button type="button" data-view="settings" class="nav-button"><svg class="icon" aria-hidden="true"><use href="#icon-settings"/></svg><span>Настройки</span></button>
+      </nav>
+      <div id="status-indicator" class="status-pill" data-tone="neutral"><span class="status-dot" aria-hidden="true"></span><span id="status" role="status" aria-live="polite">Проверка…</span></div>
     </div>
-    <section id="history-panel" class="history-panel" hidden aria-labelledby="history-title"><div class="section-heading"><h2 id="history-title">Последние 20 сессий</h2><button id="open-logs" type="button">Открыть папку журналов</button></div><p id="history-status" class="muted"></p><ul id="history-list" class="history-list"></ul><details id="history-report"><summary>Выбранная сессия: полный JSON</summary><pre id="history-json">Выберите запись выше.</pre></details></section>
-    <footer>Действия выполняются в реальных приложениях. Если нужный элемент недоступен или уверенность ниже порога, Jeff останавливается и записывает причину. Возможности ограничены доступными инструментами и данными Windows UI Automation.</footer>
+  </header>
+
+  <main class="app-main">
+    <section id="view-assistant" class="view" aria-labelledby="hero-title">
+      <div class="page-heading"><h1 id="hero-title">Что нужно сделать?</h1><p id="hero-subtitle">Скажите или напишите задачу. Ход выполнения появится здесь.</p></div>
+      <section class="composer" aria-label="Новая задача">
+        <label class="sr-only" for="command">Задача для Jeff</label>
+        <textarea id="command" rows="3" maxlength="1024" spellcheck="false" placeholder="Например, открой диспетчер задач" aria-describedby="command-help counter"></textarea>
+        <div class="composer-meta"><span id="command-help">Одна задача за раз — голосом или текстом</span><span id="counter">0 / 1024</span></div>
+        <div class="composer-actions">
+          <button id="voice-manual" type="button" class="button primary"><svg class="icon" aria-hidden="true"><use href="#icon-mic"/></svg><span id="voice-manual-label">Сказать команду</span></button>
+          <button id="run" type="button" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg><span>Выполнить</span></button>
+          <button id="voice-finish" type="button" class="button secondary" hidden><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg><span>Завершить запись</span></button>
+          <button id="stop" type="button" class="button danger" hidden><svg class="icon" aria-hidden="true"><use href="#icon-stop"/></svg><span>Остановить</span></button>
+        </div>
+        <div class="voice-line">
+          <div class="voice-current"><span id="voice-wave" class="voice-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><div><span id="voice-state" class="voice-state" data-state="off">Микрофон выключен</span><p id="voice-status" aria-live="polite">Нажмите «Сказать команду», чтобы начать.</p></div></div>
+          <button id="voice-wake" type="button" class="wake-toggle" aria-pressed="false"><span class="toggle-track" aria-hidden="true"><span></span></span><span id="voice-wake-label">Ожидать Jarvis</span></button>
+        </div>
+      </section>
+      <div class="examples" aria-label="Примеры задач">
+        <span class="examples-label">Попробуйте</span>
+        <button type="button" data-example="taskmgr"><svg class="icon" aria-hidden="true"><use href="#icon-window"/></svg>Открыть программу</button>
+        <button type="button" data-example="reminder"><svg class="icon" aria-hidden="true"><use href="#icon-bell"/></svg>Напомнить</button>
+        <button type="button" data-example="note"><svg class="icon" aria-hidden="true"><use href="#icon-note"/></svg>Записать заметку</button>
+        <button type="button" data-example="question"><svg class="icon" aria-hidden="true"><use href="#icon-chat"/></svg>Задать вопрос</button>
+      </div>
+      <section id="voice-notice" class="notice" data-tone="warning" role="status" hidden><svg class="icon notice-icon" aria-hidden="true"><use href="#icon-info"/></svg><div><h2 id="voice-notice-title"></h2><p id="voice-notice-message"></p></div></section>
+      <p id="voice-transcript" class="transcript" aria-live="polite" hidden></p>
+      <p id="voice-metrics" class="caption" hidden></p>
+      <section id="reminder-card" class="notice reminder-card" role="alert" hidden><svg class="icon notice-icon" aria-hidden="true"><use href="#icon-bell"/></svg><div><h2>Напоминание</h2><p id="reminder-text"></p></div><button id="reminder-dismiss" type="button" class="icon-button" aria-label="Закрыть напоминание"><svg class="icon" aria-hidden="true"><use href="#icon-close"/></svg></button></section>
+      <section id="task-card" class="task-card" data-tone="neutral" aria-labelledby="result-title" hidden>
+        <div class="task-heading"><span id="task-state" class="task-state">Задача</span><span id="task-time" class="caption"></span></div>
+        <p id="task-command" class="task-command"></p>
+        <div class="task-result"><span class="result-mark" aria-hidden="true"></span><div class="result-copy"><h2 id="result-title">Готовлю задачу</h2><p id="activity" class="activity" role="status" aria-live="polite"></p><p id="result-message" class="result-message"></p></div></div>
+        <ol id="activity-list" class="activity-list" aria-label="Ход выполнения"></ol>
+        <div id="result-actions" class="result-actions"><button id="edit-command" type="button" class="button secondary small"><svg class="icon" aria-hidden="true"><use href="#icon-edit"/></svg>Изменить задачу</button><button id="show-details" type="button" class="button quiet small"><svg class="icon" aria-hidden="true"><use href="#icon-info"/></svg>Подробнее</button></div>
+      </section>
+      <section id="welcome" class="welcome" aria-label="Как пользоваться"><div class="welcome-icon"><svg class="icon" aria-hidden="true"><use href="#icon-chat"/></svg></div><div><h2>Начните с простой задачи</h2><p>Откройте программу, сохраните заметку или попросите напомнить о деле. Jeff покажет результат — и объяснит, если что-то не получится.</p></div></section>
+    </section>
+
+    <section id="view-history" class="view" aria-labelledby="history-title" hidden>
+      <div class="page-heading heading-with-actions"><div><h1 id="history-title">История задач</h1><p>Последние действия, ответы и причины остановки.</p></div><button id="history-refresh" type="button" class="button quiet small"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg>Обновить</button></div>
+      <p id="history-status" class="caption" role="status" aria-live="polite"></p>
+      <ul id="history-list" class="history-list" aria-label="Последние задачи"></ul>
+      <div id="history-empty" class="empty-state"><span class="empty-icon"><svg class="icon" aria-hidden="true"><use href="#icon-history"/></svg></span><h2>Здесь будет история</h2><p>После первой задачи вы сможете посмотреть её результат и каждый шаг выполнения.</p></div>
+      <div class="history-footer"><p class="caption">Журналы хранятся на этом компьютере.</p><button id="open-logs" type="button" class="button quiet small"><svg class="icon" aria-hidden="true"><use href="#icon-folder"/></svg>Папка журналов</button></div>
+    </section>
+
+    <section id="view-settings" class="view" aria-labelledby="settings-title" hidden>
+      <div class="page-heading"><h1 id="settings-title">Настройки</h1><p>Голос, выполнение команд и доступность сервисов.</p></div>
+      <section class="settings-card" aria-labelledby="voice-settings-title">
+        <h2 id="voice-settings-title">Голос и команды</h2>
+        <label class="setting-row" for="voice-beep"><span><strong>Сигнал активации</strong><span class="setting-description">Короткий звук, когда Jeff начинает слушать команду.</span></span><input id="voice-beep" type="checkbox" checked></label>
+        <label class="setting-row" for="voice-reply"><span><strong>Ответ голосом</strong><span class="setting-description">Денис озвучит результат. Генерация речи работает локально.</span></span><input id="voice-reply" type="checkbox" checked></label>
+        <label class="setting-row" for="voice-auto"><span><strong>Выполнять после распознавания</strong><span class="setting-description">Если выключить, команда останется в поле — её можно проверить и изменить.</span></span><input id="voice-auto" type="checkbox" checked></label>
+        <p class="setting-note">Запись завершается после <span id="voice-silence">2,5 с</span> тишины. Для голосовой активации нажмите «Включить Jarvis» и произнесите «Hey Jarvis».</p>
+      </section>
+      <section class="settings-card" aria-labelledby="providers-title"><h2 id="providers-title">Компоненты</h2><dl class="provider-list"><div><dt><strong>Gemini</strong><span>Распознавание речи и ответы на вопросы</span></dt><dd id="provider-gemini" data-tone="neutral">Проверка…</dd></div><div><dt><strong>Денис</strong><span>Голосовой ответ на компьютере</span></dt><dd id="provider-denis" data-tone="neutral">Проверка…</dd></div><div><dt><strong>Hey Jarvis</strong><span>Локальное распознавание имени</span></dt><dd id="provider-wake" data-tone="neutral">Проверка…</dd></div></dl></section>
+      <section class="privacy-card" aria-labelledby="privacy-title"><svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg><div><h2 id="privacy-title">Когда используются данные</h2><p>Ожидание имени работает локально. После активации записанная фраза отправляется в Gemini. Во время управления Windows текст задачи и названия доступных окон и элементов передаются TypeSafe. Изображение экрана не отправляется.</p></div></section>
+      <p id="version-label" class="version-label">Assistant Jeff</p>
+    </section>
   </main>
+
+  <footer class="app-footer"><div class="footer-inner"><span><svg class="icon" aria-hidden="true"><use href="#icon-mic"/></svg><span id="footer-status">Микрофон выключен</span></span><span class="footer-note">Управление вашим компьютером</span></div></footer>
+
+  <dialog id="details-dialog" aria-labelledby="detail-title" aria-describedby="detail-summary">
+    <div class="dialog-heading"><div><span class="eyebrow">Подробности задачи</span><h2 id="detail-title">Что произошло</h2></div><button id="close-details" type="button" class="icon-button" aria-label="Закрыть подробности" autofocus><svg class="icon" aria-hidden="true"><use href="#icon-close"/></svg></button></div>
+    <p id="detail-summary" class="detail-summary"></p>
+    <details class="technical-details"><summary>Полный отчёт и решения модели</summary><pre id="trace">Запустите задачу, чтобы увидеть отчёт.</pre></details>
+    <details class="technical-details"><summary>Доступные окна и элементы</summary><div class="observation-heading"><button id="start" type="button" class="button secondary small"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg>Обновить окна</button><span id="snapshot-version" class="caption"></span></div><p id="summary" class="caption">Состояние Windows ещё не запрашивалось.</p><h3>Окна</h3><ul id="windows" class="window-list"></ul><h3>Элементы</h3><ul id="elements" class="elements"></ul><details><summary>Факты и метаданные</summary><pre id="facts">Нет данных</pre></details></details>
+  </dialog>
 </body>
 </html>

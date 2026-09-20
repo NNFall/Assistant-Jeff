@@ -137,6 +137,14 @@ test('external abort calls desktop.stop but preserves the actual desktop report'
   assert.equal(await pending,actual);assert.equal(stops,1);
 });
 
+test('pre-aborted desktop request reaches its journal owner with a cancelled signal',async t=>{
+  const actual={ok:false,reason:'aborted',runId:'cancelled-desktop'};
+  const f=await fixture(t,{desktop:{run:async({signal})=>{assert.equal(signal.aborted,true);return actual;},stop(){}}});
+  const abort=new AbortController();abort.abort();
+  assert.equal(await f.service.run({command:'открой диспетчер задач',signal:abort.signal}),actual);
+  assert.equal(f.service.running,false);
+});
+
 test('chat failures do not reveal thrown messages or call desktop',async t=>{
   const f=await fixture(t,{chat:async()=>{throw new Error('Secret gateway URL and credential');}});
   const report=await f.service.run({command:'расскажи о музыке'});

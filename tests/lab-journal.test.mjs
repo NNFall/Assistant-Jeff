@@ -62,6 +62,19 @@ test('unfinished run recovers durable events and distinguishes active from inter
   assert.equal((await listRuns({directory})).runs[0].status,'interrupted');
 });
 
+test('compact history keeps the truthful title even when answer and receipts are omitted',async t=>{
+  const directory=await workspace(t);
+  const chat=await RunJournal.create('Объясни, что такое память',{directory});
+  await chat.finish({ok:true,reason:'chat_answer',message:'Тестовый ответ'});
+  const launch=await RunJournal.create('Открой программу',{directory});
+  await launch.record('execute_result',{receipt:{operation:'launch',verified:false,evidence:'process_started_window_not_observed'}});
+  await launch.finish({ok:false,reason:'not_verified',executionUncertain:true});
+  const {runs}=await listRuns({directory});
+  assert.deepEqual(runs.find(r=>r.runId===chat.runId).feedback,{tone:'success',title:'Ответ готов'});
+  assert.deepEqual(runs.find(r=>r.runId===launch.runId).feedback,{tone:'warning',title:'Программа запущена, окно не найдено'});
+  assert.ok(runs.every(r=>!('events' in r)&&!('message' in r)));
+});
+
 test('run identifiers cannot escape the configured directory',async t=>{
   const directory=await workspace(t);
   for(const runId of ['../1234567890123','..\\1234567890123','/1234567890123','C:\\1234567890123','1234567890123/../../x','1234567890123.json','1234567890123\0']){
