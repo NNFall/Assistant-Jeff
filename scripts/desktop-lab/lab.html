@@ -43,7 +43,7 @@
 
   <main class="app-main">
     <section id="view-assistant" class="view" aria-labelledby="hero-title">
-      <div class="page-heading"><h1 id="hero-title">Что нужно сделать?</h1><p id="hero-subtitle">Скажите или напишите задачу. Ход выполнения появится здесь.</p></div>
+      <div class="page-heading"><div class="heading-with-actions"><div><h1 id="hero-title">Что нужно сделать?</h1><p id="hero-subtitle">Скажите или напишите задачу. Ход выполнения появится здесь.</p></div><button id="new-conversation" type="button" class="button quiet small">Новый разговор</button></div></div>
       <section class="composer" aria-label="Новая задача">
         <label class="sr-only" for="command">Задача для Jeff</label>
         <textarea id="command" rows="3" maxlength="1024" spellcheck="false" placeholder="Например, открой диспетчер задач" aria-describedby="command-help counter"></textarea>
@@ -109,8 +109,18 @@
   <dialog id="details-dialog" aria-labelledby="detail-title" aria-describedby="detail-summary">
     <div class="dialog-heading"><div><span class="eyebrow">Подробности задачи</span><h2 id="detail-title">Что произошло</h2></div><button id="close-details" type="button" class="icon-button" aria-label="Закрыть подробности" autofocus><svg class="icon" aria-hidden="true"><use href="#icon-close"/></svg></button></div>
     <p id="detail-summary" class="detail-summary"></p>
-    <details class="technical-details"><summary>Полный отчёт и решения модели</summary><pre id="trace">Запустите задачу, чтобы увидеть отчёт.</pre></details>
-    <details class="technical-details"><summary>Доступные окна и элементы</summary><div class="observation-heading"><button id="start" type="button" class="button secondary small"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg>Обновить окна</button><span id="snapshot-version" class="caption"></span></div><p id="summary" class="caption">Состояние Windows ещё не запрашивалось.</p><h3>Окна</h3><ul id="windows" class="window-list"></ul><h3>Элементы</h3><ul id="elements" class="elements"></ul><details><summary>Факты и метаданные</summary><pre id="facts">Нет данных</pre></details></details>
+    <section id="readable-log" class="readable-log" aria-labelledby="readable-log-title" hidden>
+      <h3 id="readable-log-title" class="readable-log-title">Понятный журнал выполнения</h3>
+      <p id="readable-log-intro" class="readable-log-intro">Здесь показаны выбранные варианты, вероятность выбора и уверенность модели отдельно. Идентификаторы вариантов оставлены только в технических данных ниже.</p>
+      <section id="data-sent-panel" class="log-panel" aria-labelledby="data-sent-title"><h4 id="data-sent-title">Какие данные передавались</h4><ul id="data-sent-list" class="log-facts"></ul></section>
+      <section id="capability-panel" class="log-panel" aria-labelledby="capability-title" hidden><h4 id="capability-title">Возможности в этом отчёте</h4><p id="capability-context" class="caption" hidden></p><ul id="capability-list" class="capability-list"></ul></section>
+      <section id="decision-panel" class="log-panel" aria-labelledby="decision-title"><h4 id="decision-title">Решения по шагам</h4><ol id="decision-steps" class="decision-steps"></ol><p id="decision-empty" class="log-empty" hidden>Решения модели не записаны.</p></section>
+      <section id="execution-panel" class="log-panel" aria-labelledby="execution-title"><h4 id="execution-title">Результаты действий</h4><ol id="execution-steps" class="execution-steps"></ol><p id="execution-empty" class="log-empty" hidden>Действий в отчёте нет.</p></section>
+      <section id="observation-panel" class="log-panel" aria-labelledby="readable-observation-title"><h4 id="readable-observation-title">Что было видно Windows</h4><div id="readable-observation-meta" class="observation-meta"></div><div class="observation-columns"><div><h5>Окна</h5><ul id="readable-windows" class="readable-list"></ul></div><div><h5>Элементы текущего окна</h5><ul id="readable-controls" class="readable-list"></ul></div></div><p id="readable-observation-empty" class="log-empty" hidden>Наблюдение Windows не приложено к отчёту.</p></section>
+      <section id="agent-response-panel" class="log-panel" aria-labelledby="agent-response-title" hidden><h4 id="agent-response-title">Ответ агента</h4><ol id="agent-responses" class="agent-responses"></ol></section>
+    </section>
+    <details class="technical-details"><summary>Технический JSON и внутренние идентификаторы (дополнительно)</summary><pre id="trace">Запустите задачу, чтобы увидеть отчёт.</pre></details>
+    <details class="technical-details"><summary>Сырые данные наблюдения Windows (дополнительно)</summary><div class="observation-heading"><button id="start" type="button" class="button secondary small"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"/></svg>Обновить окна</button><span id="snapshot-version" class="caption"></span></div><p id="summary" class="caption">Состояние Windows ещё не запрашивалось.</p><h3>Окна</h3><ul id="windows" class="window-list"></ul><h3>Элементы</h3><ul id="elements" class="elements"></ul><details><summary>Факты и метаданные</summary><pre id="facts">Нет данных</pre></details></details>
   </dialog>
 </body>
 </html>

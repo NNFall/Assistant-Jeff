@@ -1,6 +1,7 @@
 'use strict';
 import {VoiceClient} from './voice-client.mjs';
 import {describeResult,describeError} from '../../desktop/automation/feedback.mjs';
+import {formatAgentProgress,formatLogView} from '../../desktop/automation/log-view.mjs';
 
 const $=id=>document.getElementById(id);
 const api=window.lab;
@@ -25,6 +26,17 @@ function note(notice){
 }
 function clearNotice(){hidden('voice-notice',true);hidden('voice-metrics',true);}
 function clearTranscript(){text('voice-transcript','');hidden('voice-transcript',true);delete $('voice-transcript').dataset.final;}
+function resetConversationView(){
+  serial++;lastReport=null;detailReport=null;lastFinishedRunId=null;currentRunId=null;activeSource=null;startedAt=0;progressEvents=[];activities=[];clearNotice();clearTranscript();
+  $('command').value='';hidden('task-card',true);hidden('welcome',false);hidden('readable-log',true);hidden('result-actions',true);$('activity-list').replaceChildren();$('task-card').dataset.tone='neutral';$('task-card').setAttribute('aria-busy','false');text('trace','Запустите задачу, чтобы увидеть отчёт.');text('task-time','');text('task-command','');text('activity','');
+  if($('details-dialog').open)$('details-dialog').close();
+}
+async function newConversation(){
+  if(busy())return;const button=$('new-conversation');button.disabled=true;
+  try{if(typeof api?.clearContext==='function')checked(await api.clearContext());resetConversationView();}
+  catch(error){note(failure(error));}
+  finally{button.disabled=false;sync();}
+}
 function taskClock(){if(startedAt&&pending)text('task-time',duration(performance.now()-startedAt));}
 function sync(){
   const active=busy();
@@ -32,7 +44,7 @@ function sync(){
   $('command').disabled=active;
   $('voice-manual').disabled=!voiceState.ready||active;
   $('voice-finish').disabled=voiceState.state!=='recording'||stopping;hidden('voice-finish',voiceState.state!=='recording');
-  $('stop').disabled=stopping;hidden('stop',!active);
+  $('stop').disabled=stopping;hidden('stop',!active);hidden('new-conversation',active);
   $('voice-wake').disabled=!voiceState.ready||active;
   $('voice-wake').setAttribute('aria-pressed',String(voiceState.enabled));
   text('voice-wake-label',voiceState.enabled?'Выключить Jarvis':'Включить Jarvis');
@@ -69,7 +81,7 @@ function renderActivities(finalTone){
   for(const item of items){const li=document.createElement('li');li.dataset.state=finalTone&&finalTone!=='success'?'neutral':'done';li.textContent=item.label;$('activity-list').append(li);}
 }
 function activity(event){
-  let label=phaseLabels[event.phase];
+  let label=String(event?.phase??'').startsWith('agent_')?formatAgentProgress(event):phaseLabels[event.phase];
   if(event.phase==='execute_request')label=operationLabels[event.operation??event.candidate?.operation]||'Выполняю действие';
   if(event.phase==='verify')label=event.outcome==='verified'?'Действие подтверждено':event.outcome==='observed_change'?'Проверяю изменения':'Результат действия требует проверки';
   if(event.phase==='local_execute_result')label=event.result?.ok?'Сохранено':'Не удалось сохранить';
@@ -173,10 +185,98 @@ async function loadHistory(){
       row.className='history-item';button.type='button';heading.className='history-command';heading.textContent=item.command||'Задача';meta.className='history-meta';
       const stamp=new Date(item.createdAt??item.time??Number(String(item.runId).split('-')[0]));meta.textContent=[Number.isNaN(stamp.getTime())?'':stamp.toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),duration(item.elapsedMs)].filter(Boolean).join(' · ');
       const desc=item.feedback??describeResult(item);outcome.className='history-result';outcome.dataset.tone=desc.tone;outcome.textContent=desc.title;
-      button.append(heading,meta,outcome);button.addEventListener('click',async()=>{button.disabled=true;try{openDetails(checked(await api.readRun({runId:item.runId})));}catch(error){text('history-status',failure(error).message);}finally{button.disabled=false;}});row.append(button);$('history-list').append(row);
+      button.append(heading,meta,outcome);button.addEventListener('click',async()=>{button.disabled=true;try{await openDetails(checked(await api.readRun({runId:item.runId})));}catch(error){text('history-status',failure(error).message);}finally{button.disabled=false;}});row.append(button);$('history-list').append(row);
     }
   }catch(error){text('history-status',failure(error).message);}
   finally{historyLoading=false;$('history-refresh').disabled=false;}
+}
+const element=(tag, className)=>{const node=document.createElement(tag);if(className)node.className=className;return node;};
+const percent=value=>Number.isFinite(value)?`${Math.round(value*100)} %`:'Нет данных';
+function logMetric(label,value){const item=element('div','log-metric'),term=element('dt'),description=element('dd');term.textContent=label;description.textContent=value;item.append(term,description);return item;}
+function renderDataSent(fields){
+  const list=$('data-sent-list');if(!list)return;list.replaceChildren();
+  for(const field of fields??[]){const item=element('li','log-fact'),label=element('span','log-fact-label'),value=element('span','log-fact-value');label.textContent=field.label;value.textContent=field.value;item.append(label,value);list.append(item);}
+}
+function renderCapabilities(capabilities,context){
+  const panel=$('capability-panel'),list=$('capability-list'),contextNode=$('capability-context');if(!panel||!list)return;list.replaceChildren();hidden('capability-panel',!(capabilities?.length));if(contextNode){const turns=Number.isSafeInteger(context?.turns)&&context.turns>=0;const history=Number.isSafeInteger(context?.historyTurns)&&context.historyTurns>=0;const details=[];if(history)details.push(`Контекст прошлых ходов: ${context.historyTurns}.`);else if(turns)details.push(`В разговоре учтено ходов: ${context.turns}.`);if(Number.isSafeInteger(context?.toolCount)&&context.toolCount>=0)details.push(`Операций передано: ${context.toolCount}.`);contextNode.textContent=details.join(' ')||'Данные контекста не записаны в этом старом отчёте.';hidden('capability-context',!(capabilities?.length));}
+  for(const capability of capabilities??[]){
+    const item=element('li','capability-item'),copy=element('span','capability-copy'),title=element('strong','capability-title'),description=element('span','capability-description'),status=element('span','capability-status');
+    title.textContent=capability.title;description.textContent=capability.description||'Описание не приложено к отчёту.';status.dataset.available=capability.available===null?'unknown':String(capability.available);status.textContent=capability.available===true?'Доступно':capability.available===false?'Недоступно':'Статус не указан';copy.append(title,description);
+    if(capability.reason){const reason=element('span','capability-reason');reason.textContent=capability.reason;copy.append(reason);}item.append(copy,status);list.append(item);
+  }
+}
+function renderDecisionSteps(steps){
+  const list=$('decision-steps'),empty=$('decision-empty');if(!list)return;list.replaceChildren();hidden('decision-empty',Boolean(steps?.length));
+  for(const step of steps??[]){
+    const item=element('li','decision-step'),heading=element('div','log-step-heading'),number=element('span','log-step-number'),kind=element('span','log-step-kind'),action=element('strong','log-step-action'),metrics=element('dl','log-metrics');
+    number.textContent=`Шаг ${step.index}`;kind.textContent=step.kind==='goal'?'Проверка цели':'Решение модели';action.textContent=step.selectedAction;heading.append(number,kind);item.append(heading,action);
+    metrics.append(logMetric('Вероятность выбора',percent(step.probability)),logMetric('Уверенность модели',percent(step.confidence)));item.append(metrics);
+    if(step.criterion){const detail=element('p','log-detail');detail.textContent=step.criterion;item.append(detail);}
+    if((step.alternatives??[]).length>1){
+      const disclosure=document.createElement('details');disclosure.className='log-options';const summary=document.createElement('summary');summary.textContent=`Все варианты (${step.alternatives.length})`;const table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr');
+      for(const label of ['Вариант','Вероятность']){const cell=document.createElement('th');cell.textContent=label;row.append(cell);}head.append(row);const body=document.createElement('tbody');
+      for(const alternative of step.alternatives){const optionRow=document.createElement('tr'),labelCell=document.createElement('td'),probabilityCell=document.createElement('td');labelCell.textContent=alternative.label;probabilityCell.textContent=percent(alternative.probability);optionRow.append(labelCell,probabilityCell);body.append(optionRow);}
+      table.append(head,body);disclosure.append(summary,table);item.append(disclosure);
+    }
+    list.append(item);
+  }
+}
+function renderDataTree(nodes) {
+  const list = element('ul', 'result-data-tree');
+  for (const node of nodes ?? []) {
+    const item = element('li', 'result-data-node');
+    const heading = element('span', 'result-data-label');
+    heading.textContent = node.label || 'Данные';
+    item.append(heading);
+    if (node.value !== undefined) {
+      const value = element('span', 'result-data-value');
+      value.textContent = String(node.value);
+      item.append(value);
+    }
+    if (node.children?.length) item.append(renderDataTree(node.children));
+    list.append(item);
+  }
+  return list;
+}
+function renderExecutionSteps(steps){
+  const list=$('execution-steps');if(!list)return;list.replaceChildren();hidden('execution-empty',Boolean(steps?.length));
+  for(const step of steps??[]){
+    const item=element('li','execution-step'),heading=element('div','log-step-heading'),number=element('span','log-step-number'),status=element('span','execution-status'),label=element('strong','log-step-action');
+    item.dataset.status=step.status;number.textContent='Шаг '+step.index;status.dataset.status=step.status;status.textContent=step.statusLabel;label.textContent=step.label;heading.append(number,status);item.append(heading,label);
+    if(step.message){const message=element('p','execution-message');message.textContent=step.message;item.append(message);}
+    if(step.evidence){const evidence=element('p','execution-evidence');evidence.textContent='Проверка: '+step.evidence;item.append(evidence);}
+    if(step.dataSent){const sent=element('p','execution-message');sent.textContent='Передано: '+step.dataSent;item.append(sent);}
+    if(step.dataTree?.length){const disclosure=document.createElement('details');disclosure.className='execution-data';const summary=document.createElement('summary');summary.textContent='Данные результата';disclosure.append(summary,renderDataTree(step.dataTree));item.append(disclosure);}
+    list.append(item);
+  }
+}
+function observationMeta(label,value){const item=element('div','observation-meta-item'),name=element('span','observation-meta-label'),textNode=element('span','observation-meta-value');name.textContent=label;textNode.textContent=value;item.append(name,textNode);return item;}
+function renderReadableObservation(observation){
+  const meta=$('readable-observation-meta'),windows=$('readable-windows'),controls=$('readable-controls');if(!meta||!windows||!controls)return;meta.replaceChildren();windows.replaceChildren();controls.replaceChildren();
+  hidden('readable-observation-empty',Boolean(observation?.available));
+  if(!observation?.available)return;
+  const available=observation.availableWindow?[observation.availableWindow.title,observation.availableWindow.app].filter(Boolean).join(' · '):'Не выбрано';
+  meta.append(observationMeta('Охват наблюдения',observation.coverage),observationMeta('Доступное окно',available),observationMeta('Элементы окна',`${observation.controls.length}`));
+  for(const win of observation.windows??[]){const item=element('li'),title=element('strong'),detail=element('small');title.textContent=win.title;detail.textContent=[win.app,win.active?'на переднем плане':'',win.minimized?'свёрнуто':''].filter(Boolean).join(' · ')||'Состояние окна не указано';item.append(title,detail);windows.append(item);}
+  for(const control of observation.controls??[]){const item=element('li'),title=element('strong'),detail=element('small');title.textContent=control.name;detail.textContent=[control.role,control.selected===true?'выбрано':'',control.toggleState,control.expandState].filter(Boolean).join(' · ')||'Состояние элемента не указано';item.append(title,detail);controls.append(item);}
+  if(!observation.windows?.length){const item=element('li');item.textContent='Окон в снимке нет.';windows.append(item);}
+  if(!observation.controls?.length){const item=element('li');item.textContent='Элементы текущего окна не наблюдались.';controls.append(item);}
+}
+function renderAgentResponses(responses){
+  const panel=$('agent-response-panel'),list=$('agent-responses');if(!panel||!list)return;list.replaceChildren();hidden('agent-response-panel',!(responses?.length));
+  for(const response of responses??[]){const item=element('li');item.textContent=response.text;list.append(item);}
+}
+function renderReadableLog(report){
+  const panel=$('readable-log');if(!panel)return;const model=formatLogView(report??{});hidden('readable-log',false);text('readable-log-intro',model.agentMode?'Здесь показано, какие данные получил Jeff, какие операции выполнил и что было подтверждено.':'Здесь показаны выбранные варианты, вероятность выбора и уверенность модели отдельно. Идентификаторы вариантов оставлены только в технических данных ниже.');renderDataSent(model.dataSent);renderCapabilities(model.capabilities,model.context);renderDecisionSteps(model.decisions);renderExecutionSteps(model.executions);renderReadableObservation(model.observation);renderAgentResponses(model.agentResponses);
+}
+async function hydrateCapabilities(report){
+  const hasCapabilities=Array.isArray(report?.capabilities)||Array.isArray(report?.capabilities?.capabilities);
+  if(hasCapabilities||typeof api?.capabilities!=='function')return;
+  try{
+    const capabilities=checked(await api.capabilities());
+    if(detailReport!==report)return;
+    detailReport={...report,capabilities};renderReadableLog(detailReport);
+  }catch{}
 }
 function renderSnapshot(snapshot){
   $('windows').replaceChildren();$('elements').replaceChildren();
@@ -186,10 +286,11 @@ function renderSnapshot(snapshot){
   for(const element of snapshot.elements??[]){if(element.role==='Window')continue;const li=document.createElement('li');li.textContent=element.name||element.label||element.role;$('elements').append(li);}
   text('facts',pretty(snapshot));
 }
-function openDetails(report=lastReport){
+async function openDetails(report=lastReport){
   detailReport=report;
   text('detail-title',report?.command||'Подробности задачи');text('detail-summary',report?describeResult(report).message:'События текущей задачи');
-  text('trace',pretty(report??{status:'running',runId:currentRunId,events:progressEvents}));renderSnapshot(report?.final??null);
+  const detailsReport=report??{status:'running',runId:currentRunId,events:progressEvents};
+  renderReadableLog(detailsReport);text('trace',pretty(detailsReport));renderSnapshot(report?.final??null);await hydrateCapabilities(detailsReport);
   if(!$('details-dialog').open)$('details-dialog').showModal();
 }
 async function refreshProviders(){
@@ -205,6 +306,7 @@ for(const button of document.querySelectorAll('[data-view]'))button.addEventList
 for(const button of document.querySelectorAll('[data-example]'))button.addEventListener('click',()=>{$('command').value=examples[button.dataset.example]??'';sync();$('command').focus();});
 $('command').addEventListener('input',()=>{hidden('voice-transcript',true);sync();});$('command').addEventListener('keydown',event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();void run();}});
 $('run').addEventListener('click',()=>void run());$('stop').addEventListener('click',()=>void stop());
+$('new-conversation').addEventListener('click',()=>void newConversation());
 $('voice-manual').addEventListener('click',async()=>{if(busy())return;clearNotice();clearTranscript();lastReport=null;activeSource='voice';if(voiceState.enabled)await voice.activate();else await voice.start('manual');});
 $('voice-wake').addEventListener('click',async()=>{if(!voice)return;if(voiceState.enabled||voiceState.busy)await stop();else{clearNotice();await voice.start('wake');}});
 $('voice-finish').addEventListener('click',()=>void voice?.finish());

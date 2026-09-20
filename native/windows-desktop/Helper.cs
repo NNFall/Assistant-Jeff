@@ -19,6 +19,7 @@ internal sealed class DesktopError : Exception
 {
     public readonly string Code; public readonly string Stage; public readonly string ProviderCode; public readonly bool? EffectAttempted;
     public DesktopError(string code) : base(code) { Code = code; }
+    public DesktopError(string code, bool effectAttempted) : base(code) { Code = code; EffectAttempted = effectAttempted; }
     public DesktopError(string code, string stage, Exception provider, bool effectAttempted) : base(code)
     {
         Code = code; Stage = stage; ProviderCode = "0x" + Marshal.GetHRForException(provider).ToString("X8"); EffectAttempted = effectAttempted;
@@ -36,17 +37,23 @@ internal sealed class DesktopTarget
 {
     public WindowIdentity Window; public AutomationElement Element; public string[] Capabilities; public Dictionary<string, object> State; public string Runtime; public string SemanticIdentity; public string NameFingerprint; public bool IsFocusedEdit;
 }
+internal sealed class TextTarget
+{
+    public WindowIdentity Window; public AutomationElement Element; public string Runtime; public long ProcessStart; public string WindowFingerprint; public string ValueHash; public string Version; public string Id;
+}
 internal sealed class WalkEntry
 {
     public AutomationElement Element; public int Depth; public string ParentKey; public string Group; public int Order; public int Priority; public int Sequence; public ControlType? KnownRole;
 }
 internal sealed class TabGroupState { public int Expected; public bool Complete; }
 
-// This is a product backend. It never executes model-generated code, reads
-// text/value contents, types arbitrary keys or falls back to screen coordinates.
+// This is a product backend. It never executes model-generated code, types
+// arbitrary keys or falls back to screen coordinates. General window
+// observations do not read text/value contents; the dedicated text_* methods
+// read bounded non-secret ValuePattern values after their own UIA guards.
 internal sealed class WindowsDesktopHelper : IDisposable
 {
-    private const int MaxWindows = 64, MaxElements = 160, MaxScanned = 480, MaxDepth = 12, ObserveBudgetMs = 1800;
+    private const int MaxWindows = 64, MaxElements = 160, MaxScanned = 480, MaxDepth = 12, ObserveBudgetMs = 1800, MaxTextValue = 2000;
     private UIA3Automation desktopAutomation;
     private UIA3Automation automation
     {
@@ -69,9 +76,14 @@ internal sealed class WindowsDesktopHelper : IDisposable
     private readonly string fixturePath;
     private string selectedWindowId;
     private Dictionary<string, DesktopTarget> observed = new Dictionary<string, DesktopTarget>();
+    private Dictionary<string, TextTarget> textObserved = new Dictionary<string, TextTarget>();
+    private string textObservationVersion;
+    private string textObservationWindowId;
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 4194304, RecursionLimit = 32 };
     private static readonly Regex SensitiveWindow = new Regex(@"password|passkey|sign[ -]?in|log[ -]?in|authentication|authorization|two.factor|security|credential|парол|войти|вход в|авторизац|аутентификац|безопасност|настройки|параметры|settings|учетн|учётн", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex SecretText = new Regex(@"apikey_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,}|Bearer\s+\S+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex BlockedTextContext = new Regex(@"(?:^\s*(?:javascript:|data:|file:)|developer\s*(?:tools?|console)|command\s*prompt|powershell|windows\s*terminal|(?:^|[ ._-])terminal(?:$|[ ._-])|cmd(?:\.exe)?|shell)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex BlockedTextPayload = new Regex(@"^\s*(?:javascript:|data:|file:)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly HashSet<string> BlockedProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
         "codex", "chatgpt", "windowsterminal", "powershell", "pwsh", "cmd", "conhost", "openconsole", "mintty", "bash", "wsl", "wt",
         "credentialuibroker", "logonui", "consent", "winlogon", "lockapp", "systemsettings", "sechealthui", "securityhealthsystray", "mmc", "regedit",
@@ -116,7 +128,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
         if (BlockedProcesses.Contains(window.ProcessName)) return true;
         string path = window.Path.ToLowerInvariant(), title = window.Title;
         if (path.Contains("\\codex\\") || path.Contains("\\chatgpt\\") || path.Contains("\\1password\\") || path.Contains("\\bitwarden\\") || path.Contains("\\keepass")) return true;
-        if (SensitiveWindow.IsMatch(title) || title.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("ChatGPT", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("Jeff Windows", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("Assistant Jeff", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        if (SensitiveWindow.IsMatch(title) || BlockedTextContext.IsMatch(title) || title.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("ChatGPT", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("Jeff Windows", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("Assistant Jeff", StringComparison.OrdinalIgnoreCase) >= 0) return true;
         return false;
     }
     private static bool IsTaskManagerPath(string path)
@@ -272,6 +284,104 @@ internal sealed class WindowsDesktopHelper : IDisposable
             { "metadata", new Dictionary<string, object> { { "provider", "FlaUI.UIA3 5.0.0" }, { "monitorCount", Screen.AllScreens.Length }, { "truncated", truncated }, { "scannedElements", scanned }, { "fixtureRestricted", fixturePid > 0 }, { "surfaceStatus", surfaceStatus }, { "providerErrors", providerErrors }, { "skippedCrossProcess", skippedCrossProcess }, { "tabOrderPartial", elements.Any(x => (string)x["role"] == "TabItem" && Boolean(x, "visualOrderIsPartial")) } } }
         };
     }
+    private Dictionary<string, object> ObserveText(string windowId)
+    {
+        DesktopTarget observedWindow;
+        if (!observed.TryGetValue(windowId, out observedWindow) || observedWindow.Element != null) throw new DesktopError("TEXT_WINDOW_NOT_OBSERVED", false);
+        var window = Revalidate(observedWindow.Window);
+        if (IsTaskManagerPath(window.Path) || IsIconic(window.Handle)) throw new DesktopError("TEXT_WINDOW_UNAVAILABLE", false);
+
+        textObserved = new Dictionary<string, TextTarget>(); textObservationVersion = null; textObservationWindowId = null;
+        var watch = Stopwatch.StartNew(); var fields = new List<Dictionary<string, object>>(); var targets = new List<TextTarget>();
+        var errors = new List<Dictionary<string, object>>(); int scanned = 0, omitted = 0, passwordOmitted = 0, secretOmitted = 0, readOnlyOmitted = 0; bool truncated = false;
+        try { ReadTextSurface(window, fields, targets, errors, ref scanned, ref omitted, ref passwordOmitted, ref secretOmitted, ref readOnlyOmitted, ref truncated, watch); }
+        catch (DesktopError) { throw; }
+        catch (Exception error) { ProviderError(errors, "text_surface", error); truncated = true; }
+
+        var semantic = Json.Serialize(new { windowId = window.Id, fields = fields.Select(x => new { id = x["id"], label = x["label"], value = x["value"], truncated = x.ContainsKey("truncated") ? x["truncated"] : null }).ToList() });
+        string version = Hash(semantic);
+        foreach (var target in targets) { target.Version = version; textObserved[target.Id] = target; }
+        textObservationVersion = version; textObservationWindowId = window.Id;
+        var coverage = new Dictionary<string, object> {
+            { "scanned", scanned }, { "maxScanned", MaxScanned }, { "maxDepth", MaxDepth }, { "elapsedMs", (int)Math.Min(Int32.MaxValue, watch.ElapsedMilliseconds) },
+            { "truncated", truncated }, { "fieldCount", fields.Count }, { "omittedFields", omitted }, { "passwordFieldsOmitted", passwordOmitted },
+            { "secretFieldsOmitted", secretOmitted }, { "readOnlyFieldsOmitted", readOnlyOmitted }, { "providerErrors", errors }
+        };
+        return new Dictionary<string, object> { { "version", version }, { "windowId", window.Id }, { "fields", fields }, { "coverage", coverage } };
+    }
+    private void ReadTextSurface(WindowIdentity window, List<Dictionary<string, object>> fields, List<TextTarget> targets, List<Dictionary<string, object>> errors,
+        ref int scanned, ref int omitted, ref int passwordOmitted, ref int secretOmitted, ref int readOnlyOmitted, ref bool truncated, Stopwatch watch)
+    {
+        Revalidate(window); var root = automation.FromHandle(window.Handle);
+        if (root.Properties.ProcessId.Value != window.Pid) throw new DesktopError("TARGET_IDENTITY_CHANGED", false);
+        var walker = automation.TreeWalkerFactory.GetControlViewWalker(); var queue = new List<WalkEntry>();
+        queue.Add(new WalkEntry { Element = root, Depth = 0, ParentKey = window.Id, Group = "Text fields", Priority = 0, Sequence = 0 });
+        int sequence = 0;
+        while (queue.Count > 0)
+        {
+            if (watch.ElapsedMilliseconds >= ObserveBudgetMs || scanned >= MaxScanned) { truncated = true; break; }
+            var entry = queue.OrderBy(x => x.Priority).ThenBy(x => x.Depth).ThenBy(x => x.Sequence).First(); queue.Remove(entry); var element = entry.Element; scanned++;
+            if (entry.Depth > MaxDepth) { truncated = true; continue; }
+            ControlType role;
+            if (entry.Depth > 0)
+            {
+                try
+                {
+                    if (element.Properties.ProcessId.Value != window.Pid) { omitted++; continue; }
+                    role = entry.KnownRole.HasValue ? entry.KnownRole.Value : element.ControlType;
+                    bool password;
+                    // IsPassword must be known false before reading Name or Value.
+                    if (!element.Properties.IsPassword.TryGetValue(out password)) { omitted++; continue; }
+                    if (password) { omitted++; passwordOmitted++; continue; }
+                    if (role == ControlType.Edit)
+                    {
+                        bool enabled = element.IsEnabled, offscreen = element.IsOffscreen;
+                        if (!enabled || offscreen || !element.Patterns.Value.IsSupported) { omitted++; continue; }
+                        bool readOnly;
+                        try { readOnly = element.Patterns.Value.Pattern.IsReadOnly.Value; }
+                        catch (Exception error) { ProviderError(errors, "text_readonly", error); omitted++; readOnlyOmitted++; continue; }
+                        if (readOnly) { omitted++; readOnlyOmitted++; continue; }
+                        string runtime = RuntimeId(element); if (runtime.Length == 0) { omitted++; continue; }
+                        string rawLabel = element.Name ?? "";
+                        if (BlockedTextContext.IsMatch(window.Title) || BlockedTextContext.IsMatch(rawLabel)) { omitted++; continue; }
+                        string value = element.Patterns.Value.Pattern.Value ?? "";
+                        if (SecretText.IsMatch(value) || BlockedTextPayload.IsMatch(value)) { omitted++; if (SecretText.IsMatch(value)) secretOmitted++; continue; }
+                        string id = "txt_" + Hash(window.Id + ":" + runtime + ":" + Hash(value)).Substring(0, 24);
+                        string label = Text(rawLabel, 500); if (label.Length == 0) label = "Editable text field";
+                        bool valueTruncated = value.Length > MaxTextValue;
+                        var field = new Dictionary<string, object> {
+                            { "id", id }, { "windowId", window.Id }, { "label", label }, { "value", valueTruncated ? value.Substring(0, MaxTextValue) : value },
+                            { "role", "Edit" }, { "enabled", true }, { "offscreen", false }, { "readOnly", false }, { "writable", true }, { "supportsValuePattern", true }
+                        };
+                        if (valueTruncated) field["truncated"] = true;
+                        fields.Add(field); targets.Add(new TextTarget { Id = id, Window = window, Element = element, Runtime = runtime, ProcessStart = window.Started,
+                            WindowFingerprint = window.Id + ":" + window.Pid + ":" + window.Started + ":" + window.Path, ValueHash = Hash(value) });
+                        continue; // Do not traverse an Edit's descendants.
+                    }
+                }
+                catch (Exception error) { ProviderError(errors, "text_element", error); omitted++; truncated = true; continue; }
+            }
+            if (entry.Depth == MaxDepth) { truncated = true; continue; }
+            try
+            {
+                var children = new List<AutomationElement>(); var child = walker.GetFirstChild(element); bool completeChildren = true;
+                while (child != null)
+                {
+                    if (children.Count >= MaxElements || queue.Count + children.Count >= MaxScanned || watch.ElapsedMilliseconds >= ObserveBudgetMs) { truncated = true; completeChildren = false; break; }
+                    children.Add(child); try { child = walker.GetNextSibling(child); } catch (Exception error) { ProviderError(errors, "text_next_sibling", error); truncated = true; completeChildren = false; break; }
+                }
+                int ordinal = 0;
+                foreach (var descendant in children)
+                {
+                    ControlType? childRole = null; try { childRole = descendant.ControlType; } catch (Exception error) { ProviderError(errors, "text_child_role", error); truncated = true; completeChildren = false; }
+                    queue.Add(new WalkEntry { Element = descendant, Depth = entry.Depth + 1, ParentKey = entry.ParentKey, Group = entry.Group, Order = ++ordinal,
+                        KnownRole = childRole, Priority = TraversalPriority(childRole), Sequence = ++sequence });
+                }
+                if (!completeChildren) truncated = true;
+            }
+            catch (Exception error) { ProviderError(errors, "text_children", error); truncated = true; }
+        }
+    }
     private static void ProviderError(List<Dictionary<string, object>> errors, string stage, Exception error)
     {
         string code = "0x" + Marshal.GetHRForException(error).ToString("X8");
@@ -414,6 +524,68 @@ internal sealed class WindowsDesktopHelper : IDisposable
         {
             elements.Add(state); next[id] = new DesktopTarget { Window = window, Element = element, Capabilities = caps, State = state, Runtime = runtime, IsFocusedEdit = true, SemanticIdentity = "Edit:" + Text(automationId, 200) }; count++;
         }
+    }
+    private static void ExactArguments(Dictionary<string, object> args, params string[] keys)
+    {
+        if (args == null || args.Count != keys.Length || keys.Any(key => !args.ContainsKey(key))) throw new DesktopError("INVALID_ARGUMENT", false);
+    }
+    private static string TextIdentifier(Dictionary<string, object> args, string key)
+    {
+        object value; if (!args.TryGetValue(key, out value) || !(value is string)) throw new DesktopError("INVALID_ARGUMENT", false);
+        string text = (string)value; bool version = key == "expectedVersion"; if (text.Length < (version ? 16 : 1) || text.Length > 128 || !Regex.IsMatch(text, version ? "^[a-f0-9]{16,128}$" : "^[A-Za-z][A-Za-z0-9_-]{0,127}$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)) throw new DesktopError("INVALID_ARGUMENT", false);
+        return text;
+    }
+    private static string TextReplacement(Dictionary<string, object> args)
+    {
+        object supplied; if (!args.TryGetValue("text", out supplied) || !(supplied is string)) throw new DesktopError("INVALID_TEXT_PAYLOAD", false);
+        string text = (string)supplied; if (text.Length > MaxTextValue || BlockedTextPayload.IsMatch(text)) throw new DesktopError("INVALID_TEXT_PAYLOAD", false);
+        for (int i = 0; i < text.Length; i++)
+        {
+            char ch = text[i]; if (Char.IsControl(ch) && ch != '\r' && ch != '\n' && ch != '\t') throw new DesktopError("INVALID_TEXT_PAYLOAD", false);
+            if (Char.IsHighSurrogate(ch)) { if (i + 1 >= text.Length || !Char.IsLowSurrogate(text[i + 1])) throw new DesktopError("INVALID_TEXT_PAYLOAD", false); i++; }
+            else if (Char.IsLowSurrogate(ch)) throw new DesktopError("INVALID_TEXT_PAYLOAD", false);
+        }
+        return text;
+    }
+    private string ValidateTextTarget(TextTarget target, string expectedVersion)
+    {
+        if (target == null || textObservationVersion == null || textObservationWindowId == null || target.Version != expectedVersion || expectedVersion != textObservationVersion) throw new DesktopError("STALE_TEXT_SNAPSHOT", false);
+        WindowIdentity window;
+        try { window = Revalidate(target.Window); }
+        catch (DesktopError) { throw new DesktopError("TEXT_TARGET_IDENTITY_CHANGED", false); }
+        if (window.Id != textObservationWindowId || window.Started != target.ProcessStart || target.WindowFingerprint != window.Id + ":" + window.Pid + ":" + window.Started + ":" + window.Path) throw new DesktopError("TEXT_TARGET_IDENTITY_CHANGED", false);
+        var element = target.Element; bool password;
+        if (element == null || element.Properties.ProcessId.Value != window.Pid || element.ControlType != ControlType.Edit || !element.Properties.IsPassword.TryGetValue(out password) || password) throw new DesktopError("TEXT_TARGET_UNAVAILABLE", false);
+        if (RuntimeId(element) != target.Runtime || !element.IsEnabled || element.IsOffscreen || !element.Patterns.Value.IsSupported) throw new DesktopError("TEXT_TARGET_UNAVAILABLE", false);
+        bool readOnly; try { readOnly = element.Patterns.Value.Pattern.IsReadOnly.Value; } catch (Exception error) { throw new DesktopError("TEXT_TARGET_UNAVAILABLE", "validate_text", error, false); }
+        if (readOnly) throw new DesktopError("TEXT_TARGET_READ_ONLY", false);
+        string current = element.Patterns.Value.Pattern.Value ?? "";
+        if (SecretText.IsMatch(current) || BlockedTextPayload.IsMatch(current)) throw new DesktopError("TEXT_TARGET_SENSITIVE", false);
+        if (Hash(current) != target.ValueHash) throw new DesktopError("TEXT_VALUE_CHANGED", false);
+        return current;
+    }
+    private object ReplaceText(Dictionary<string, object> args)
+    {
+        ExactArguments(args, "targetId", "expectedVersion", "text"); string targetId = TextIdentifier(args, "targetId"), expectedVersion = TextIdentifier(args, "expectedVersion"); string replacement = TextReplacement(args);
+        TextTarget target; if (!textObserved.TryGetValue(targetId, out target)) throw new DesktopError("TEXT_TARGET_NOT_OBSERVED", false);
+        try { ValidateTextTarget(target, expectedVersion); }
+        catch (DesktopError) { throw; }
+        catch (Exception error) { throw new DesktopError("TEXT_TARGET_UNAVAILABLE", "validate_text", error, false); }
+        try { WithMutationTimeout(delegate { target.Element.Patterns.Value.Pattern.SetValue(replacement); }); }
+        catch (DesktopError) { throw; }
+        catch (Exception error) { throw new DesktopError("TEXT_OUTCOME_UNKNOWN", "apply_text", error, true); }
+        string actual;
+        try { actual = target.Element.Patterns.Value.Pattern.Value ?? ""; }
+        catch (Exception error) { throw new DesktopError("TEXT_OUTCOME_UNKNOWN", "verify_text", error, true); }
+        string actualHash = Hash(actual);
+        if (actual != replacement) return new Dictionary<string, object> {
+            { "operation", "text_replace" }, { "targetId", targetId }, { "verified", false }, { "effectAttempted", true }, { "evidence", "text_value_mismatch" },
+            { "expectedVersion", expectedVersion }, { "textLength", replacement.Length }, { "valueHash", actualHash }
+        };
+        return new Dictionary<string, object> {
+            { "operation", "text_replace" }, { "targetId", targetId }, { "verified", true }, { "effectAttempted", true }, { "evidence", "text_value_verified" },
+            { "expectedVersion", expectedVersion }, { "textLength", replacement.Length }, { "valueHash", actualHash }
+        };
     }
     private void ValidateFocusedEdit(DesktopTarget target)
     {
@@ -673,6 +845,8 @@ internal sealed class WindowsDesktopHelper : IDisposable
             if (hasWindow && value != null && (!(value is string) || ((string)value).Length > 100)) throw new DesktopError("INVALID_ARGUMENT");
             return Observe(value as string, hasWindow);
         }
+        if (method == "text_observe") { ExactArguments(args, "windowId"); return ObserveText(TextIdentifier(args, "windowId")); }
+        if (method == "text_replace") return ReplaceText(args);
         if (method == "execute") return Execute(args);
         throw new DesktopError("UNKNOWN_METHOD");
     }

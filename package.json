@@ -1,6 +1,6 @@
 {
   "name": "assistant-jeff",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Личный голосовой помощник для Windows",
   "private": true,
   "type": "module",
@@ -52,6 +52,11 @@
     ],
     "extraResources": [
       {
+        "from": "work/winapp-runtime",
+        "to": "winapp-runtime",
+        "filter": ["winapp.exe", "libSkiaSharp.dll", "runtime-manifest.json", "licenses/**/*"]
+      },
+      {
         "from": "models",
         "to": "models",
         "filter": [
@@ -61,7 +66,14 @@
       {
         "from": "work/windows-desktop/bin",
         "to": "windows-desktop",
-        "filter": ["JeffWindowsDesktopHelper.exe", "JeffWindowsDesktopHelper.exe.config", "*.dll", "licenses/**/*", "artifacts.json", "dependencies.json"]
+        "filter": [
+          "JeffWindowsDesktopHelper.exe",
+          "JeffWindowsDesktopHelper.exe.config",
+          "*.dll",
+          "licenses/**/*",
+          "artifacts.json",
+          "dependencies.json"
+        ]
       },
       {
         "from": "scripts/windows-desktop/read-apps.ps1",
@@ -70,17 +82,32 @@
       {
         "from": "work/voice-runtime/piper",
         "to": "voice-runtime/piper",
-        "filter": ["piper.exe", "*.dll", "libtashkeel_model.ort", "espeak-ng-data/**/*", "licenses/**/*", "runtime-manifest.json"]
+        "filter": [
+          "piper.exe",
+          "*.dll",
+          "libtashkeel_model.ort",
+          "espeak-ng-data/**/*",
+          "licenses/**/*",
+          "runtime-manifest.json"
+        ]
       },
       {
         "from": "work/voice-runtime/ffmpeg",
         "to": "voice-runtime/ffmpeg",
-        "filter": ["ffmpeg.exe", "LICENSE", "runtime-manifest.json"]
+        "filter": [
+          "ffmpeg.exe",
+          "LICENSE",
+          "runtime-manifest.json"
+        ]
       },
       {
         "from": "data/tts/piper",
         "to": "voices",
-        "filter": ["ru_RU-denis-medium.onnx", "ru_RU-denis-medium.onnx.json", "denis-MODEL_CARD.md"]
+        "filter": [
+          "ru_RU-denis-medium.onnx",
+          "ru_RU-denis-medium.onnx.json",
+          "denis-MODEL_CARD.md"
+        ]
       }
     ],
     "asarUnpack": [

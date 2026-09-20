@@ -14,6 +14,7 @@ using System.Windows.Forms;
 internal sealed class InputFixture : Form
 {
     private readonly TextBox normal = new TextBox();
+    private readonly TextBox secondary = new TextBox();
     private readonly TextBox password = new TextBox();
     private readonly TextBox readOnly = new TextBox();
     private readonly Button neutral = new Button();
@@ -25,15 +26,16 @@ internal sealed class InputFixture : Form
     {
         Text = "Jeff Native Input Fixture"; Name = "JeffNativeInputFixture";
         AccessibleName = Text; StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(630, 315); Font = new Font("Segoe UI", 10);
+        ClientSize = new Size(630, 405); Font = new Font("Segoe UI", 10);
         AddField(normal, "Writable synthetic field", "PRIVATE_FIELD_NAME_NORMAL", "INITIAL_NORMAL_SENTINEL_92a6", 30);
         normal.Multiline = true;
-        AddField(password, "Protected synthetic field", "PRIVATE_FIELD_NAME_PASSWORD", "INITIAL_PASSWORD_SENTINEL_1b3d", 100);
+        AddField(secondary, "Writable nonfocused synthetic field", "PRIVATE_FIELD_NAME_SECONDARY", "INITIAL_SECONDARY_SENTINEL_48c1", 125);
+        AddField(password, "Protected synthetic field", "PRIVATE_FIELD_NAME_PASSWORD", "INITIAL_PASSWORD_SENTINEL_1b3d", 170);
         password.UseSystemPasswordChar = true;
-        AddField(readOnly, "Read-only synthetic field", "PRIVATE_FIELD_NAME_READONLY", "INITIAL_READONLY_SENTINEL_6f5a", 170);
+        AddField(readOnly, "Read-only synthetic field", "PRIVATE_FIELD_NAME_READONLY", "INITIAL_READONLY_SENTINEL_6f5a", 245);
         readOnly.ReadOnly = true;
         neutral.Text = "Neutral focus"; neutral.Name = "NeutralFocus"; neutral.AccessibleName = "Neutral focus";
-        neutral.SetBounds(25, 252, 150, 32); Controls.Add(neutral);
+        neutral.SetBounds(25, 330, 150, 32); Controls.Add(neutral);
         Shown += delegate {
             originalLayout = GetKeyboardLayout(GetCurrentThreadId());
             normal.Focus();
@@ -54,8 +56,8 @@ internal sealed class InputFixture : Form
     private object State()
     {
         return new {
-            normalText = normal.Text, passwordText = password.Text, readOnlyText = readOnly.Text,
-            focusedField = normal.Focused ? "normal" : password.Focused ? "password" : readOnly.Focused ? "readonly" : neutral.Focused ? "none" : "unknown",
+            normalText = normal.Text, secondaryText = secondary.Text, passwordText = password.Text, readOnlyText = readOnly.Text,
+            focusedField = normal.Focused ? "normal" : secondary.Focused ? "secondary" : password.Focused ? "password" : readOnly.Focused ? "readonly" : neutral.Focused ? "none" : "unknown",
             foreground = GetForegroundWindow() == Handle,
             keyboardLayoutId = LayoutId(GetKeyboardLayout(GetCurrentThreadId())), originalKeyboardLayoutId = LayoutId(originalLayout)
         };
@@ -68,9 +70,17 @@ internal sealed class InputFixture : Form
         {
             object requested; string field = args.TryGetValue("field", out requested) ? requested as string : null;
             Control target = field == "normal" ? normal : field == "password" ? password : field == "readonly" ? readOnly : field == "none" ? (Control)neutral : null;
+            if (field == "secondary") target = secondary;
             if (target == null) throw new InvalidOperationException("INVALID_FIELD");
             Activate(); SetForegroundWindow(Handle); target.Focus();
             return State();
+        }
+        if (method == "set")
+        {
+            object requestedField, requestedText; string field = args.TryGetValue("field", out requestedField) ? requestedField as string : null; string text = args.TryGetValue("text", out requestedText) ? requestedText as string : null;
+            Control target = field == "normal" ? normal : field == "secondary" ? secondary : field == "password" ? password : field == "readonly" ? readOnly : null;
+            if (target == null || text == null || text.Length > 2000) throw new InvalidOperationException("INVALID_FIELD");
+            target.Text = text; return State();
         }
         if (method == "restore_layout") { RestoreLayout(); return State(); }
         if (method == "close") { BeginInvoke(new Action(Close)); return new { closing = true }; }

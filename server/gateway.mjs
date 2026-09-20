@@ -3,6 +3,15 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { attachLiveTranscription } from './gemini-live.mjs';
+import {
+  AgentInputError,
+  AgentModelError,
+  DEFAULT_AGENT_OUTPUT_TOKENS,
+  MAX_AGENT_BODY_BYTES,
+  buildAgentModelRequest,
+  sanitizeAgentModelResponse,
+  validateAgentRequest,
+} from './agent-model.mjs';
 
 const MAX_AUDIO_BYTES = 1024 * 1024;
 const MAX_TRANSCRIBE_BODY = 2 * 1024 * 1024;
@@ -69,24 +78,30 @@ export function createGatewayServer({
   token = process.env.JEFF_GATEWAY_TOKEN,
   apiKey = process.env.GEMINI_API_KEY,
   model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
+  agentModel = process.env.JEFF_AGENT_MODEL || 'gemini-3.1-flash-lite',
   transcribeModel = process.env.GEMINI_TRANSCRIBE_MODEL || 'gemini-3.5-transcribe',
   liveModel = process.env.GEMINI_LIVE_TRANSCRIBE_MODEL || 'gemini-3.5-transcribe-live',
   liveOptions = {},
   fetchImpl = globalThis.fetch,
   chatTimeoutMs = 25000,
   transcribeTimeoutMs = 45000,
+  agentTimeoutMs = 60000,
+  agentMaxOutputTokens = Number(process.env.JEFF_AGENT_MAX_OUTPUT_TOKENS || DEFAULT_AGENT_OUTPUT_TOKENS),
 } = {}) {
   if (!token || !apiKey) throw new Error('Server credentials are not configured');
+  if (typeof agentModel !== 'string' || !agentModel.trim() || agentModel.length > 128) throw new Error('Agent model is not configured');
+  if (!Number.isSafeInteger(agentMaxOutputTokens) || agentMaxOutputTokens < 1 || agentMaxOutputTokens > 8192) throw new Error('Agent output token budget is invalid');
   const expected = Buffer.from(`Bearer ${token}`);
   let active = 0;
   const server = http.createServer(async (req, res) => {
     const given = Buffer.from(req.headers.authorization || '');
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) return reply(res, 401, { error: 'Unauthorized' });
-    if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'assistant-jeff', model, transcribeModel, liveModel });
+    if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'assistant-jeff', model, agentModel, transcribeModel, liveModel });
     const transcribe = req.url === '/transcribe';
-    if (req.method !== 'POST' || (!transcribe && req.url !== '/chat')) return reply(res, 404, { error: 'Not found' });
+    const agent = req.url === '/agent';
+    if (req.method !== 'POST' || (!transcribe && !agent && req.url !== '/chat')) return reply(res, 404, { error: 'Not found' });
     if (active >= 2) return reply(res, 429, { error: 'Busy' });
-    const limit = transcribe ? MAX_TRANSCRIBE_BODY : 16384;
+    const limit = transcribe ? MAX_TRANSCRIBE_BODY : agent ? MAX_AGENT_BODY_BYTES : 16384;
     if (Number(req.headers['content-length']) > limit) return reply(res, 413, { error: 'Too large' });
     active++;
     const cancel = new AbortController();
@@ -102,17 +117,27 @@ export function createGatewayServer({
         chunks.push(chunk);
       }
       let body;
-      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return reply(res, 400, { error: 'Invalid JSON' }); }
-      if (!body || typeof body !== 'object' || Array.isArray(body)) return reply(res, 400, { error: 'Invalid request' });
-      if (transcribe ? !audioFromBody(body) : typeof body.text !== 'string' || !body.text.trim() || body.text.length > 4096) return reply(res, 400, { error: transcribe ? 'Invalid MP3 audio' : 'Invalid text' });
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      catch { return reply(res, 400, agent ? { error: 'Invalid JSON', code: 'AGENT_INPUT_INVALID', validation: 'request JSON is invalid' } : { error: 'Invalid JSON' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return reply(res, 400, agent ? { error: 'Invalid request', code: 'AGENT_INPUT_INVALID', validation: 'request must be an object' } : { error: 'Invalid request' });
+      let agentRequest;
+      if (agent) {
+        try { agentRequest = validateAgentRequest(body); }
+        catch (error) {
+          const validation = error instanceof AgentInputError && typeof error.message === 'string' ? error.message : 'request is invalid';
+          return reply(res, 400, { error: 'Invalid agent request', code: 'AGENT_INPUT_INVALID', validation });
+        }
+      } else if (transcribe ? !audioFromBody(body) : typeof body.text !== 'string' || !body.text.trim() || body.text.length > 4096) {
+        return reply(res, 400, { error: transcribe ? 'Invalid MP3 audio' : 'Invalid text' });
+      }
       cancel.signal.throwIfAborted();
       const started = performance.now();
-      const signal = AbortSignal.any([cancel.signal, AbortSignal.timeout(transcribe ? transcribeTimeoutMs : chatTimeoutMs)]);
-      const url = transcribe ? 'https://generativelanguage.googleapis.com/v1beta/interactions' : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+      const signal = AbortSignal.any([cancel.signal, AbortSignal.timeout(transcribe ? transcribeTimeoutMs : agent ? agentTimeoutMs : chatTimeoutMs)]);
+      const url = transcribe ? 'https://generativelanguage.googleapis.com/v1beta/interactions' : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(agent ? agentModel : model)}:generateContent`;
       const payload = transcribe ? {
         model: transcribeModel, store: false,
         input: [{ type: 'audio', mime_type: 'audio/mp3', data: body.audio }],
-      } : {
+      } : agent ? buildAgentModelRequest(agentRequest, { model: agentModel, maxOutputTokens: agentMaxOutputTokens }) : {
         contents: [{ role: 'user', parts: [{ text: body.text }] }],
         systemInstruction: { parts: [{ text: 'Ты Jeff, личный помощник. Отвечай кратко и естественно по-русски. Ты отвечаешь только текстом. Не утверждай, что открыл программу, создал заметку, напоминание или выполнил действие: у тебя нет инструментов. Не придумывай актуальную погоду или результаты поиска.' }] },
         generationConfig: { maxOutputTokens: 1024 },
@@ -120,14 +145,29 @@ export function createGatewayServer({
       const upstream = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey }, signal, body: JSON.stringify(payload) });
       if (!upstream.ok) {
         await upstream.body?.cancel?.().catch(() => {});
-        return reply(res, 502, { error: 'Gemini unavailable', upstreamStatus: upstream.status });
+        return reply(res, 502, agent ? {
+          error: 'Gemini unavailable',
+          code: 'GEMINI_UPSTREAM_ERROR',
+          upstreamStatus: upstream.status,
+          details: { status: 502, upstreamStatus: upstream.status },
+        } : { error: 'Gemini unavailable', upstreamStatus: upstream.status });
       }
       const data = await readJson(upstream, MAX_RESPONSE_BYTES);
       signal.throwIfAborted();
+      if (agent) {
+        const result = sanitizeAgentModelResponse(data, { tools: agentRequest.tools });
+        return reply(res, 200, { content: result.content, model: agentModel, usage: result.usage, latencyMs: Math.round(performance.now() - started) });
+      }
       const text = transcribe ? transcriptionText(data) : data.candidates?.[0]?.content?.parts?.filter(p => !p.thought).map(p => p.text || '').join('').trim();
       if (typeof text !== 'string' || !text || text.length > 16384) return reply(res, 502, { error: 'Empty or invalid response' });
       reply(res, 200, transcribe ? { text, model: transcribeModel, latencyMs: Math.round(performance.now() - started) } : { text, model, usage: data.usageMetadata });
-    } catch {
+    } catch (error) {
+      if (agent) {
+        if (error instanceof AgentModelError) {
+          return reply(res, 502, { error: 'Provider request failed', code: 'AGENT_MODEL_INVALID', validation: error.message });
+        }
+        return reply(res, 502, { error: 'Provider request failed', code: 'AGENT_PROVIDER_ERROR' });
+      }
       reply(res, 502, { error: 'Provider request failed' });
     } finally {
       active--;

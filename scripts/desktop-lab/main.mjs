@@ -6,8 +6,12 @@ import {DatabaseSync} from 'node:sqlite';
 import {WindowsDesktop} from '../windows-desktop/controller.mjs';
 import {WindowsBridge} from '../windows-desktop/bridge.mjs';
 import {InstalledApps} from '../../desktop/automation/windows-apps.mjs';
-import {UnifiedCommands} from '../../desktop/automation/assistant-commands.mjs';
-import {interpretAssistantCommand} from '../../desktop/providers/assistant-intent.mjs';
+import {AgentCommands} from '../../desktop/agent/commands.mjs';
+import {createDataTools} from '../../desktop/agent/data-tools.mjs';
+import {createWindowsTools} from '../../desktop/agent/windows-tools.mjs';
+import {createWinAppTools} from '../../desktop/agent/winapp-tools.mjs';
+import {createTextTools} from '../../desktop/agent/text-tools.mjs';
+import {createAgentSystemTools} from '../../desktop/agent/system-tools.mjs';
 import {createSystemTools} from '../../desktop/automation/system-tools.mjs';
 import {Store} from '../../desktop/core/index.mjs';
 import {readProtected} from '../../desktop/secrets.mjs';
@@ -73,9 +77,10 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
       const after={minimized:!!window&&!window.isDestroyed()&&window.isMinimized()};
       return {verified:after.minimized,effectAttempted:!before.minimized,before,after};
     }});
-    commands=new UnifiedCommands({desktop:lab,store,chat:(text,options)=>gateway.chat(text,options),progress,directory:paths.logs,
-      interpret:async(text,options)=>interpretAssistantCommand(text,{...options,apiKey:await lab.apiKeyResolver()}),
-      executeSystem:(intent,options)=>systemTools.executeSystemTool(intent,options)});
+    commands=new AgentCommands({progress,directory:paths.logs,
+      modelStep:(payload,options)=>gateway.agentStep(payload,options),
+      createTools:()=>[...createDataTools({store}),...createWindowsTools({desktop:lab}),...createTextTools({desktop:lab}),...createAgentSystemTools({systemTools}),
+        ...createWinAppTools({executable:paths.winapp}).map(tool=>({...tool,available:fs.existsSync(paths.winapp),reason:fs.existsSync(paths.winapp)?undefined:'Компонент управления Windows не установлен.'}))]});
     voice=new VoiceSession({paths,encoder:new Mp3Encoder({executablePath:paths.ffmpeg}),gateway,
       denis:new DenisVoice({executablePath:paths.piper,modelPath:paths.denis}),commands,getSettings:()=>settings,emit:voiceEvent});
     window=new BrowserWindow({width:1100,height:800,minWidth:760,minHeight:620,title:'Assistant Jeff',icon:path.join(root,'desktop','assets','icon.png'),
@@ -87,6 +92,8 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
     window.webContents.session.setPermissionCheckHandler((contents,permission,_origin,details)=>contents===window.webContents&&permission==='media'&&allowCapture&&details.isMainFrame===true&&details.mediaType==='audio');
     for(const [name,handler] of Object.entries({start:()=>lab.start(),state:()=>lab.state(),
       run:payload=>voice.runTyped(payload),
+      capabilities:()=>commands.capabilities(),
+      clearContext:()=>commands.clearContext(),
       stop:()=>{commands.stop();return voice.stop();},
       history:()=>listRuns({directory:paths.logs,activeRunIds:[commands.activeRunId,lab.activeRunId].filter(Boolean)}),
       readRun:payload=>readRun(payload?.runId,{directory:paths.logs,activeRunIds:[commands.activeRunId,lab.activeRunId].filter(Boolean)}),
@@ -113,7 +120,8 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
     }
     if(isolated&&process.argv.includes('--diagnostics')){
       const status=await voice.status();const snapshot=await lab.state();
-      fs.writeFileSync(path.join(paths.data,'diagnostics.json'),JSON.stringify({ok:status.providers.encoder&&status.providers.denis&&status.providers.wake,state:status.state,providers:status.providers,windowCount:snapshot.snapshot.windows.length,version:app.getVersion(),microphoneActivated:false},null,2));
+      const capabilities=commands.capabilities();
+      fs.writeFileSync(path.join(paths.data,'diagnostics.json'),JSON.stringify({ok:status.providers.encoder&&status.providers.denis&&status.providers.wake&&fs.existsSync(paths.winapp),state:status.state,providers:status.providers,windowCount:snapshot.snapshot.windows.length,version:app.getVersion(),microphoneActivated:false,agent:{toolCount:capabilities.length,available:capabilities.filter(tool=>tool.available).map(tool=>tool.name),winappInstalled:fs.existsSync(paths.winapp)}},null,2));
       quitting=true;app.quit();
     }
   }).catch(()=>{fs.mkdirSync(paths.data,{recursive:true});fs.writeFileSync(path.join(paths.data,'startup-error.log'),'Не удалось запустить Assistant Jeff. Проверьте установку и доступность папки данных.');app.exit(1);});

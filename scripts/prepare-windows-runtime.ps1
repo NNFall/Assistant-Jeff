@@ -28,6 +28,8 @@ foreach ($artifact in $artifacts.artifacts) {
 foreach ($dll in @('FlaUI.Core.dll', 'FlaUI.UIA3.dll', 'Interop.UIAutomationClient.dll')) { Assert-File (Join-Path $helperRoot $dll) }
 if (-not (Get-ChildItem -LiteralPath (Join-Path $helperRoot 'licenses') -File)) { throw 'Native helper license notices missing.' }
 Assert-File (Join-Path $repositoryRoot 'scripts\windows-desktop\read-apps.ps1')
+# The UIA CLI is a pinned native component, bundled with the desktop app.
+& (Join-Path $PSScriptRoot 'prepare-winapp-runtime.ps1') -SkipSmoke
 
 $modelRoot = Join-Path $repositoryRoot 'models'
 $wakeManifest = Join-Path $modelRoot 'download-manifest.json'

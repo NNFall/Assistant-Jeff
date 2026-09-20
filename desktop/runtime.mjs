@@ -6,6 +6,7 @@ export function runtimePaths({root,packaged=false,resourcesPath,appData,dataOver
   return {data,settings:path.join(data,'windows-voice-settings.json'),
     logs:dataOverride||packaged?path.join(data,'logs','windows'):path.join(root,'work','windows-desktop','runs'),
     helper:packaged?path.join(resourcesPath,'windows-desktop','JeffWindowsDesktopHelper.exe'):path.join(root,'work','windows-desktop','bin','JeffWindowsDesktopHelper.exe'),
+    winapp:packaged?path.join(resourcesPath,'winapp-runtime','winapp.exe'):path.join(root,'work','winapp-runtime','winapp.exe'),
     models:packaged?path.join(resourcesPath,'models'):path.join(root,'models'),
     piper:packaged?path.join(resourcesPath,'voice-runtime','piper','piper.exe'):path.join(root,'work','voice-runtime','piper','piper.exe'),
     denis:packaged?path.join(resourcesPath,'voices','ru_RU-denis-medium.onnx'):path.join(root,'data','tts','piper','ru_RU-denis-medium.onnx'),

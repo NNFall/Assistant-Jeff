@@ -20,7 +20,11 @@ assert.ok(relativeHelper && !relativeHelper.startsWith('..') && !path.isAbsolute
 assert.equal(process.platform, 'win32', 'Native tests require Windows');
 const fixtureExe = path.join(repo, 'work', 'desktop-lab', 'bin', 'JeffDesktopLabTarget.exe');
 const helperExe = path.join(helperDir, 'JeffWindowsDesktopHelper.exe');
-const reviewExe = path.join(helperDir, 'ReviewTests.exe');
+// The test compiler must not overwrite a binary covered by the runtime's
+// artifacts.json manifest when --helper-dir points at the release helper.
+const reviewDirectory = path.join(work, 'review-tests');
+fs.mkdirSync(reviewDirectory, { recursive: true });
+const reviewExe = path.join(reviewDirectory, 'ReviewTests.exe');
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 function command(executable, args, capture = false) {
   const result = spawnSync(executable, args, { cwd: repo, windowsHide: true, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8', timeout: 120_000 });

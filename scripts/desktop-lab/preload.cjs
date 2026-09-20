@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('lab', {
     return ipcRenderer.invoke('lab:run', { command: request.command.trim() });
   },
   history: () => ipcRenderer.invoke('lab:history'),
+  capabilities: () => ipcRenderer.invoke('lab:capabilities'),
+  clearContext: () => ipcRenderer.invoke('lab:clearContext'),
   readRun: (request) => {
     if (!request || typeof request.runId !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(request.runId)) {
       return Promise.reject(new Error('Некорректный идентификатор записи журнала.'));

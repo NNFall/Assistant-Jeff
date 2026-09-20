@@ -101,6 +101,10 @@ function execution(report) {
   const results = events.filter(event => event?.phase === 'execute_result' && effect(event.receipt));
   const receipts = results.map(event => event.receipt);
   const systemReceipts = parentEvents.filter(event => event?.phase === 'system_execute_result' && event.result && typeof event.result === 'object').map(event => event.result);
+  const agentRequests = parentEvents.filter(event => event?.phase === 'agent_tool_call' && event.effect === true);
+  const agentResults = parentEvents.filter(event => event?.phase === 'agent_tool_result');
+  const pendingAgentEffect = agentRequests.some(request => !agentResults.some(result => result.toolCallId === request.toolCall?.id));
+  const agentReceipts = agentResults.filter(result => agentRequests.some(request => request.toolCall?.id === result.toolCallId)).map(event => event.result);
   const lastReceipt = receipts.at(-1);
   const lastRequest = events.findLastIndex(event => event?.phase === 'execute_request' && effect(event));
   const lastResult = events.findLastIndex(event => event?.phase === 'execute_result' && effect(event.receipt));
@@ -115,13 +119,16 @@ function execution(report) {
     && parentEvents.some(event => event?.phase === 'desktop_delegate_request')
     && list(report.desktopEvents).length === 0;
   const known = completed.some(step => effectOutcomes.has(step.outcome)) || receipts.some(receipt => receipt.verified === true)
-    || systemReceipts.some(receipt => receipt.ok === true && receipt.verified === true);
-  const observed = completed.some(step => step.outcome === 'observed_change') || receipts.some(receipt => receipt.stateChanged === true && receipt.verified !== true);
+    || systemReceipts.some(receipt => receipt.ok === true && receipt.verified === true)
+    || agentReceipts.some(receipt => receipt?.ok === true && receipt.verified === true);
+  const observed = completed.some(step => step.outcome === 'observed_change') || receipts.some(receipt => receipt.stateChanged === true && receipt.verified !== true)
+    || agentReceipts.some(receipt=>receipt?.ok===true&&receipt.effectConfirmed===true&&receipt.verified!==true);
   // A launch rejection is reported before the process starts even though the
   // controller conservatively marks the surrounding launch call as in flight.
   const rejectedLaunch = launchRejected.has(report.reason);
   const uncertain = !rejectedLaunch && (report.executionUncertain === true || report.reason === 'execution_uncertain'
-    || pendingSemanticEffect || recoveredDelegation || lastRequest > lastResult || receipts.some(receipt => receipt.verified !== true && receipt.stateChanged !== true)
+    || pendingSemanticEffect || pendingAgentEffect || recoveredDelegation || lastRequest > lastResult || receipts.some(receipt => receipt.verified !== true && receipt.stateChanged !== true)
+    || agentReceipts.some(receipt => receipt?.effectAttempted !== false && !(receipt?.ok === true && (receipt.verified === true || receipt.effectConfirmed === true)))
     || systemReceipts.some(receipt => receipt.effectAttempted === true && receipt.verified !== true)
     || completed.some(step => !effectOutcomes.has(step.outcome) && step.outcome !== 'observed_change'));
   return {known, observed, uncertain, lastReceipt};
@@ -151,6 +158,19 @@ export function describeResult(value) {
     return withEffects(make('neutral', reason === 'interrupted' ? 'Выполнение прервано' : 'Выполнение остановлено', 'Можно ввести новую команду.', true), state);
   }
   if (reason === 'running' || report.status === 'running') return make('neutral', 'Выполняю задачу', 'Текущий шаг появится здесь. При необходимости нажмите «Остановить».');
+  if (report.ok === true && reason === 'agent_completed' && !state.uncertain) {
+    const events=list(report.events).length?report.events:list(report.trace);
+    const evidence=list(report.evidenceIds);
+    const grounded=evidence.length>0 && evidence.every(id=>events.some(event=>event?.phase==='agent_tool_result'&&event.toolCallId===id&&event.result?.ok===true&&event.result.verified===true));
+    if(grounded){const message=bounded(text(report.message)||'Задача выполнена.',2000);return make('success','Готово',message,false,message);}
+    return withEffects(make('warning','Завершение не подтверждено','В журнале нет подтверждения результата.',false),state);
+  }
+  if (report.ok === true && reason === 'agent_answer' && !state.known && !state.observed && !state.uncertain && text(report.message)) {
+    return make('success','Ответ готов',bounded(report.message,2000),false,bounded(report.message,2000));
+  }
+  if (reason === 'agent_incomplete') {
+    return withEffects(make('warning','Не получилось завершить задачу',bounded(text(report.message)||'Доступных инструментов или данных не хватило. Подробности — в истории.',2000),false),state);
+  }
   // Local and chat messages originate from successful routes only. Failure
   // branches below deliberately ignore a stale success or raw provider message.
   if (report.ok === true && reason === 'chat_answer' && text(report.message)) {
