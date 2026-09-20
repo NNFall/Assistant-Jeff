@@ -41,7 +41,7 @@ export class RunJournal {
   async finish(report){await this.flush();try{await atomicJson(this.jsonPath,{...this.initial,...report,status:'finished',events:this.events,logPath:this.jsonPath});}catch{throw error('LOG_WRITE_FAILED');}}
 }
 
-export async function readRun(runId,{directory=LOG_DIRECTORY,activeRunId}={}){
+export async function readRun(runId,{directory=LOG_DIRECTORY,activeRunId,activeRunIds=[]}={}){
   if(!validId(runId))throw error('INVALID_RUN_ID');
   try{
     const file=path.join(directory,runId+'.json');
@@ -50,15 +50,15 @@ export async function readRun(runId,{directory=LOG_DIRECTORY,activeRunId}={}){
       let lines=[];try{lines=(await boundedRead(path.join(directory,runId+'.jsonl'))).split('\n').filter(Boolean);}catch(e){if(e.code!=='ENOENT')throw e;}
       const events=[];for(const line of lines){try{events.push(JSON.parse(line));}catch{break;}}
       report.events=events;
-      if(runId!==activeRunId){report.status='interrupted';report.reason='interrupted';}
+      if(runId!==activeRunId&&!activeRunIds.includes(runId)){report.status='interrupted';report.reason='interrupted';}
     }
     return {...redact(report),runId,logPath:file};
   }catch(e){if(e.code==='ENOENT')throw error('RUN_NOT_FOUND');if(/^LOG_/.test(e.code))throw e;throw error('LOG_READ_FAILED');}
 }
-export async function listRuns({directory=LOG_DIRECTORY,activeRunId}={}){
+export async function listRuns({directory=LOG_DIRECTORY,activeRunId,activeRunIds=[]}={}){
   await mkdir(directory,{recursive:true});
   const names=(await readdir(directory)).filter(name=>name.endsWith('.json')&&validId(name.slice(0,-5))).sort().reverse().slice(0,20);
   const runs=[];
-  for(const name of names){try{const r=await readRun(name.slice(0,-5),{directory,activeRunId});const {tone,title}=describeResult(r);runs.push({runId:r.runId,createdAt:r.createdAt,command:r.command,status:r.status,ok:r.ok,reason:r.reason,elapsedMs:r.elapsedMs,feedback:{tone,title}});}catch{runs.push({runId:name.slice(0,-5),ok:false,reason:'LOG_READ_FAILED'});}}
+  for(const name of names){try{const r=await readRun(name.slice(0,-5),{directory,activeRunId,activeRunIds});const {tone,title}=describeResult(r);runs.push({runId:r.runId,createdAt:r.createdAt,command:r.command,status:r.status,ok:r.ok,reason:r.reason,elapsedMs:r.elapsedMs,feedback:{tone,title}});}catch{runs.push({runId:name.slice(0,-5),ok:false,reason:'LOG_READ_FAILED'});}}
   return {runs};
 }

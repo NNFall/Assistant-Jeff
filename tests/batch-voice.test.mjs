@@ -120,7 +120,7 @@ test('speech arriving during asynchronous wake detection is retained and counts 
   assert.equal(h.requests.length, 0);
   inference.resolve({ triggered: true });
   await until(() => h.controller.snapshot().state === 'recording');
-  feed(h.controller, SAMPLE_RATE * 2.5);
+  feed(h.controller, SAMPLE_RATE * 2);
   await until(() => h.controller.snapshot().state === 'waiting');
   assert.equal(h.requests.length, 1);
   assert.equal(h.transcripts.length, 1);
@@ -198,24 +198,24 @@ test('at least 200 ms speech is required, and exactly 200 ms is accepted', async
   await h.controller.stop();
 });
 
-test('default silence timeout is precisely 2500 ms after speech, not while speech continues', () => {
+test('default silence timeout is precisely 2000 ms after speech, not while speech continues', () => {
   const recorder = new UtteranceRecorder();
   recorder.accept(pcm(3200, 1200));
-  feed(recorder, SAMPLE_RATE * 2.5 - 1);
+  feed(recorder, SAMPLE_RATE * 2 - 1);
   assert.equal(recorder.complete, false);
   recorder.accept(pcm(1));
   assert.equal(recorder.complete, true);
   assert.equal(recorder.metadata().reason, 'silence');
-  assert.equal(recorder.metadata().durationMs, 2700);
-  assert.equal(recorder.take().length, 43200);
+  assert.equal(recorder.metadata().durationMs, 2200);
+  assert.equal(recorder.take().length, 35200);
 });
 
 test('silence countdown resets when the user continues speaking', () => {
   const recorder = new UtteranceRecorder();
   recorder.accept(pcm(3200, 1200));
-  feed(recorder, SAMPLE_RATE * 2);
+  feed(recorder, SAMPLE_RATE * 1.5);
   recorder.accept(pcm(1280, 1200));
-  feed(recorder, SAMPLE_RATE * 2);
+  feed(recorder, SAMPLE_RATE * 1.5);
   assert.equal(recorder.complete, false);
   recorder.accept(pcm(8000));
   assert.equal(recorder.metadata().reason, 'silence');

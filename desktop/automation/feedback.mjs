@@ -7,7 +7,7 @@ const text = value => typeof value === 'string' && value.trim() ? value.trim() :
 const list = value => Array.isArray(value) ? value : [];
 const effect = item => typeof item?.operation === 'string' && item.operation !== 'inspect';
 const make = (tone, title, message, retryable = false, spoken) => ({
-  tone, title, message, spoken: spoken ?? bounded(`${title}. ${message}`.trim(), 350), retryable,
+  tone, title, message, spoken: spoken ?? `${title}.`, retryable,
 });
 
 /** Accepts a stable code, never an Error.message or a provider response body. */
@@ -19,11 +19,17 @@ export function describeError(code) {
     case 'APP_TARGET_MISSING': return make('error', 'Приложение недоступно', 'Программа была перемещена или удалена. Проверьте, открывается ли она вручную.', true);
     case 'APP_NOT_OBSERVED': return make('error', 'Приложение не найдено', 'Уточните название или откройте программу вручную, затем повторите команду.', true);
     case 'TYPESAFE_KEY_MISSING':
+    case 'ASSISTANT_INTENT_KEY':
     case 'WINDOWS_CHOICE_KEY': return make('error', 'Jev не подключён', 'Не настроен ключ модели для управления компьютером. Проверьте подключение в настройках.', false);
     case 'WINDOWS_CHOICE_NETWORK':
+    case 'ASSISTANT_INTENT_NETWORK':
+    case 'ASSISTANT_INTENT_HTTP':
+    case 'ASSISTANT_INTENT_TIMEOUT':
     case 'WINDOWS_CHOICE_HTTP':
     case 'WINDOWS_CHOICE_TIMEOUT': return make('error', 'Нет ответа от Jev', 'Проверьте подключение к интернету и повторите команду немного позже.', true);
     case 'WINDOWS_CHOICE_RESPONSE':
+    case 'ASSISTANT_INTENT_RESPONSE':
+    case 'ASSISTANT_INTENT_INPUT':
     case 'WINDOWS_CHOICE_INPUT': return make('error', 'Не удалось выбрать действие', 'Ответ модели не прошёл проверку. Попробуйте короткую команду с названием приложения.', true);
     case 'WINDOWS_HELPER_MISSING':
     case 'WINDOWS_BRIDGE_UNAVAILABLE':
@@ -38,6 +44,7 @@ export function describeError(code) {
     case 'TASK_ALREADY_RUNNING': return make('neutral', 'Уже выполняю задачу', 'Дождитесь результата или нажмите «Остановить».', false);
     case 'INVALID_COMMAND': return make('warning', 'Уточните команду', 'Напишите коротко, что нужно сделать, и укажите название приложения.', true);
     case 'ABORTED':
+    case 'ASSISTANT_INTENT_ABORTED':
     case 'WINDOWS_CHOICE_ABORTED': return make('neutral', 'Выполнение остановлено', 'Можно ввести новую команду.', true);
     case 'CHAT_UNAVAILABLE': return make('error', 'Gemini не подключён', 'Проверьте подключение Gemini в настройках.', false);
     case 'CHAT_INVALID_RESPONSE': return make('error', 'Ответ Gemini не получен', 'Сервис вернул неполный ответ. Попробуйте спросить ещё раз.', true);
@@ -46,6 +53,9 @@ export function describeError(code) {
     case 'TRANSCRIPT_TOO_LONG': return make('warning', 'Команда слишком длинная', 'Разделите её на несколько коротких задач. За один раз можно распознать до 1024 символов.', true);
     case 'VOICE_PROCESSING_FAILED': return make('error', 'Не удалось обработать голосовую команду', 'Проверьте подключение к интернету и повторите запись. Команду также можно ввести текстом.', true);
     case 'GEMINI_UNAVAILABLE': return make('error', 'Распознавание речи не подключено', 'Доступ к Gemini пока не настроен. Команду можно ввести текстом.', false);
+    case 'LIVE_TRANSCRIPTION_UNAVAILABLE': return make('error', 'Распознавание в реальном времени недоступно', 'Попробуйте ещё раз или выберите «После записи» в настройках распознавания речи.', true);
+    case 'LIVE_AUDIO_REJECTED':
+    case 'LIVE_TRANSCRIPTION_FAILED': return make('error', 'Не удалось распознать речь', 'Повторите короткую фразу или выберите «После записи» в настройках распознавания речи.', true);
     case 'VOICE_MODE_INVALID': return make('warning', 'Не удалось выбрать режим записи', 'Нажмите «Сказать команду» или включите ожидание Jarvis.', true);
     case 'VOICE_BUSY': return make('neutral', 'Голосовой ввод уже занят', 'Дождитесь результата или нажмите «Остановить» перед новой записью.', false);
     case 'CLOUD_DISABLED': return make('warning', 'Распознавание речи выключено', 'Включите облачное распознавание в настройках или введите команду текстом.', false);
@@ -85,19 +95,34 @@ export function describeError(code) {
 
 function execution(report) {
   const completed = list(report.completed).filter(effect);
-  const events = list(report.events).length ? report.events : list(report.trace);
+  const parentEvents = list(report.events).length ? report.events : list(report.trace);
+  // The semantic journal keeps the desktop child's native evidence separately.
+  const events = [...parentEvents, ...list(report.desktopEvents)];
   const results = events.filter(event => event?.phase === 'execute_result' && effect(event.receipt));
   const receipts = results.map(event => event.receipt);
+  const systemReceipts = parentEvents.filter(event => event?.phase === 'system_execute_result' && event.result && typeof event.result === 'object').map(event => event.result);
   const lastReceipt = receipts.at(-1);
   const lastRequest = events.findLastIndex(event => event?.phase === 'execute_request' && effect(event));
   const lastResult = events.findLastIndex(event => event?.phase === 'execute_result' && effect(event.receipt));
-  const known = completed.some(step => effectOutcomes.has(step.outcome)) || receipts.some(receipt => receipt.verified === true);
+  // A recovered semantic journal can end after dispatch, before the child report
+  // or system receipt is copied into it. Missing evidence must not invite retry.
+  const pendingSemanticEffect = ['desktop_delegate', 'system_execute'].some(prefix =>
+    parentEvents.findLastIndex(event => event?.phase === `${prefix}_request`)
+      > parentEvents.findLastIndex(event => event?.phase === `${prefix}_result`));
+  // A result summary may be durable before the final JSON embeds the child's
+  // receipts. Its ok/reason fields alone cannot establish which effects happened.
+  const recoveredDelegation = (report.reason === 'interrupted' || report.status === 'interrupted')
+    && parentEvents.some(event => event?.phase === 'desktop_delegate_request')
+    && list(report.desktopEvents).length === 0;
+  const known = completed.some(step => effectOutcomes.has(step.outcome)) || receipts.some(receipt => receipt.verified === true)
+    || systemReceipts.some(receipt => receipt.ok === true && receipt.verified === true);
   const observed = completed.some(step => step.outcome === 'observed_change') || receipts.some(receipt => receipt.stateChanged === true && receipt.verified !== true);
   // A launch rejection is reported before the process starts even though the
   // controller conservatively marks the surrounding launch call as in flight.
   const rejectedLaunch = launchRejected.has(report.reason);
   const uncertain = !rejectedLaunch && (report.executionUncertain === true || report.reason === 'execution_uncertain'
-    || lastRequest > lastResult || receipts.some(receipt => receipt.verified !== true && receipt.stateChanged !== true)
+    || pendingSemanticEffect || recoveredDelegation || lastRequest > lastResult || receipts.some(receipt => receipt.verified !== true && receipt.stateChanged !== true)
+    || systemReceipts.some(receipt => receipt.effectAttempted === true && receipt.verified !== true)
     || completed.some(step => !effectOutcomes.has(step.outcome) && step.outcome !== 'observed_change'));
   return {known, observed, uncertain, lastReceipt};
 }
@@ -108,7 +133,8 @@ function withEffects(description, state) {
     ? 'Действие могло выполниться, но его результат не подтверждён.'
     : state.known ? 'Часть действий выполнена, но завершение задачи не подтверждено.'
       : 'Интерфейс изменился, но завершение задачи не подтверждено.';
-  return make('warning', description.title, `${prefix} ${description.message} Перед повтором проверьте результат в приложении.`, false);
+  return make('warning', description.title, `${prefix} ${description.message} Перед повтором проверьте результат в приложении.`, false,
+    'Результат не подтверждён, проверьте приложение перед повтором.');
 }
 
 /** Describes the executor's evidence; a truthy ok or an old message is not proof. */
@@ -118,7 +144,8 @@ export function describeResult(value) {
   const reason = report.reason;
   if (reason === 'LOG_WRITE_FAILED') {
     return make(state.known || state.observed || state.uncertain ? 'warning' : 'error', 'Не удалось сохранить журнал',
-      `${state.known || state.observed || state.uncertain ? 'Действия могли уже выполниться. ' : ''}Проверьте результат в приложении и свободное место на диске. Не повторяйте задачу, пока не убедитесь, что она не выполнена.`, false);
+      `${state.known || state.observed || state.uncertain ? 'Действия могли уже выполниться. ' : ''}Проверьте результат в приложении и свободное место на диске. Не повторяйте задачу, пока не убедитесь, что она не выполнена.`, false,
+      'Журнал не сохранён, проверьте результат перед повтором.');
   }
   if (reason === 'aborted' || reason === 'ABORTED' || reason === 'WINDOWS_CHOICE_ABORTED' || reason === 'interrupted') {
     return withEffects(make('neutral', reason === 'interrupted' ? 'Выполнение прервано' : 'Выполнение остановлено', 'Можно ввести новую команду.', true), state);
@@ -134,18 +161,26 @@ export function describeResult(value) {
     const message = bounded(text(report.message) || 'Локальная команда выполнена.', 2000);
     return make(kind === 'help' ? 'neutral' : 'success', kind === 'help' ? 'Что умеет Jeff' : 'Готово', message, false, bounded(message, 350));
   }
+  if (report.ok === false && reason === 'clarification_required' && report.needsClarification === true) {
+    const message = bounded(text(report.message) || 'Уточните, что нужно сделать.', 350);
+    return withEffects(make('neutral', 'Нужно уточнение', message, true, message), state);
+  }
+  if (report.ok === true && reason === 'system_completed' && report.result?.ok === true && report.result?.verified === true && !state.uncertain) {
+    const message = bounded(text(report.message) || 'Действие подтверждено.', 350);
+    return make('success', 'Готово', message, false, message);
+  }
   if (report.ok === true && (reason === 'goal_observed' || reason === 'goal_verified' && state.observed)) return make('warning', 'Проверьте результат', 'Интерфейс изменился согласно задаче, но не все действия удалось подтвердить средствами Windows.', false);
   if (report.ok === true && reason === 'goal_verified' && !state.uncertain) return make('success', 'Готово', 'Задача выполнена.', false, 'Готово. Задача выполнена.');
   // These matching native receipts explain the uncertainty more precisely. A
   // mismatched/invalid receipt (execution_uncertain) must not gain their trust.
   if (reason === 'not_verified' && state.lastReceipt?.evidence === 'text_set_unverified' && state.lastReceipt.operation === 'replace_text') {
-    return make('warning', 'Текст передан приложению', 'Команда замены отправлена, но содержимое поля не проверялось. Проверьте текст перед повтором.', false);
+    return make('warning', 'Текст передан приложению', 'Команда замены отправлена, но содержимое поля не проверялось. Проверьте текст перед повтором.', false, 'Проверьте текст в приложении перед повтором.');
   }
   if (reason === 'not_verified' && state.lastReceipt?.evidence === 'process_started_window_not_observed' && state.lastReceipt.operation === 'launch') {
-    return make('warning', 'Программа запущена, окно не найдено', 'Процесс запустился, но его окно пока не удалось увидеть. Проверьте панель задач перед повтором.', false);
+    return make('warning', 'Программа запущена, окно не найдено', 'Процесс запустился, но его окно пока не удалось увидеть. Проверьте панель задач перед повтором.', false, 'Проверьте панель задач перед повторным запуском.');
   }
   if (reason === 'execution_uncertain' || report.executionUncertain === true && !launchRejected.has(reason)) {
-    return make('warning', 'Результат не подтверждён', 'Действие могло выполниться. Проверьте приложение перед повтором команды.', false);
+    return make('warning', 'Результат не подтверждён', 'Действие могло выполниться. Проверьте приложение перед повтором команды.', false, 'Результат не подтверждён, проверьте приложение перед повтором.');
   }
   if (state.lastReceipt?.evidence === 'foreground_not_granted') {
     return withEffects(make('error', 'Не получилось показать окно', 'Windows не разрешила вывести окно вперёд. Выберите приложение на панели задач.', false), {...state, uncertain: false});
@@ -154,13 +189,14 @@ export function describeResult(value) {
   switch (reason) {
     case 'low_confidence': description = make('warning', 'Не уверен, что выбрал нужное действие', 'Уточните название приложения и одно действие, например: «Сверни Google Chrome».', true); break;
     case 'unsupported': description = make('error', 'Не нашёл подходящее действие', 'Нужное окно или элемент пока недоступны. Откройте приложение и уточните команду.', true); break;
-    case 'no_request': description = make('neutral', 'Уточните, что нужно сделать', 'Для действия укажите приложение. Для вопроса начните с «Расскажи» или «Объясни».', true); break;
+    case 'no_request': description = make('neutral', 'Уточните, что нужно сделать', 'Задайте вопрос обычными словами или назовите действие и нужное приложение.', true); break;
     case 'goal_not_verified':
     case 'not_verified': description = make('warning', 'Результат не подтверждён', 'Проверьте нужное приложение. Если задача не выполнена, уточните команду.', false); break;
     case 'time_limit': description = make('warning', 'Выполнение заняло слишком много времени', 'Разделите задачу на короткие команды и проверьте приложение.', true); break;
     case 'step_limit':
     case 'repeated_action': description = make('warning', 'Не удалось завершить задачу по шагам', 'Разделите задачу на отдельные действия с названием приложения.', true); break;
     case 'unknown_action': description = make('error', 'Не удалось выбрать действие', 'Модель выбрала недоступное действие. Уточните команду и попробуйте ещё раз.', true); break;
+    case 'intent_failed': description = describeError(report.error); break;
     case 'chat_failed': description = describeError(report.error === 'CHAT_UNAVAILABLE' || report.error === 'CHAT_INVALID_RESPONSE' ? report.error : 'CHAT_INVALID_RESPONSE');
       if (!['CHAT_UNAVAILABLE', 'CHAT_INVALID_RESPONSE'].includes(report.error)) description = make('error', 'Не получилось получить ответ Gemini', 'Проверьте подключение к интернету и попробуйте немного позже.', true);
       break;

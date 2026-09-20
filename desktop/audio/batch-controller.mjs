@@ -3,15 +3,16 @@ import { SampleRing, UtteranceRecorder, WAKE_FRAME_SAMPLES, validPcm, rms,
 
 const MAX_PENDING_WAKE_FRAMES = 6;
 
-/** Owns batch voice state, not a microphone. Only a finished utterance reaches the cloud. */
+/** Owns voice state, not a microphone. Cloud audio starts only after activation. */
 export class BatchVoiceController {
-  constructor({ createWake, encodeMp3, transcribe, onTranscript = async () => {}, onNotice = async () => {},
-    emit = () => {}, getSettings = () => ({}) } = {}) {
-    if (typeof encodeMp3 !== 'function' || typeof transcribe !== 'function') {
-      throw new TypeError('encodeMp3 and transcribe are required');
+  constructor({ createWake, encodeMp3, transcribe, createTranscriptionStream,
+    onTranscript = async () => {}, onNotice = async () => {},
+    emit = () => {}, getSettings = () => ({}), now = () => performance.now() } = {}) {
+    if ((typeof encodeMp3 !== 'function' || typeof transcribe !== 'function') && typeof createTranscriptionStream !== 'function') {
+      throw new TypeError('A transcription stream or encodeMp3 and transcribe are required');
     }
     this.createWake = createWake ?? (async options => (await import('./wake.mjs')).WakeDetector.create(options));
-    Object.assign(this, { encodeMp3, transcribe, onTranscript, onNotice, emit, getSettings });
+    Object.assign(this, { encodeMp3, transcribe, createTranscriptionStream, onTranscript, onNotice, emit, getSettings, now });
     this.state = 'stopped';
     this.generation = 0;
     this.ring = new SampleRing();
@@ -90,6 +91,7 @@ export class BatchVoiceController {
     ++this.generation;
     this.running = false;
     this.abort?.abort();
+    this.closeLive();
     this.clearWaiting();
     this.recorder?.clear();
     this.recorder = null;
@@ -116,23 +118,102 @@ export class BatchVoiceController {
     const capturedAfterWake = source === 'wake' && Number.isFinite(detectedThroughSample)
       ? Math.min(preRoll.length, Math.max(0, this.waitingSamples - detectedThroughSample)) : 0;
     const speechOffset = preRoll.length - capturedAfterWake;
+    const settings = { ...this.config, ...(this.getSettings() ?? {}) };
+    this.utteranceMode = settings.transcriptionMode === 'live' ? 'live' : 'batch';
     this.recorder = new UtteranceRecorder({ preRoll: preRoll.subarray(0, speechOffset),
-      noiseFloor: this.noiseFloor, silenceMs: this.config.silenceMs ?? this.config.voiceSilenceMs });
+      noiseFloor: this.noiseFloor, silenceMs: settings.silenceMs ?? settings.voiceSilenceMs });
     // Audio already captured while ONNX was busy is command audio, not just context.
     if (capturedAfterWake) this.recorder.accept(preRoll.subarray(speechOffset));
     this.clearWaiting();
     this.status('recording', 'Слушаю команду.');
-    const settings = { ...this.config, ...(this.getSettings() ?? {}) };
+    if (this.utteranceMode === 'live' && settings.cloudEnabled !== false) {
+      this.beginLive();
+      // Includes wake context and command audio captured during wake inference once.
+      this.sendLive(this.recorder.data.subarray(0, this.recorder.length));
+    }
     this.emit({ type: 'wake', source, beep: settings.voiceBeep ?? settings.wakeBeep ?? true,
       duckAudio: settings.duckAudio ?? true });
     return true;
+  }
+
+  beginLive() {
+    const live = { generation: this.generation, startedAt: this.now(), firstPartialMs: null,
+      sentSamples: 0, abort: new AbortController(), signal: this.abort.signal };
+    this.live = live;
+    const current = () => this.live === live && live.generation === this.generation &&
+      !live.signal.aborted && !live.abort.signal.aborted && !live.error;
+    live.cancel = () => this.closeLive(live);
+    live.signal.addEventListener('abort', live.cancel, { once: true });
+    this.emit({ type: 'stream_status', state: 'connecting' });
+    try {
+      if (typeof this.createTranscriptionStream !== 'function') {
+        throw Object.assign(new Error(), { code: 'LIVE_TRANSCRIPTION_UNAVAILABLE' });
+      }
+      live.stream = this.createTranscriptionStream({ signal: live.abort.signal,
+        onTranscript: transcript => {
+          if (!current() || !['recording', 'transcribing'].includes(this.state)) return;
+          const text = stripWakePrefix(typeof transcript === 'string' ? transcript : transcript?.text ?? transcript?.transcript).slice(0, 1024);
+          if (!text || text === live.lastPartial) return;
+          live.firstPartialMs ??= Math.max(0, Math.round(this.now() - live.startedAt));
+          live.lastPartial = text;
+          // Provider turn boundaries are not authorization to execute a command.
+          this.emit({ type: 'transcript', text, final: false, autoExecute: false, mode: 'live' });
+        },
+        onMetrics: metrics => {
+          if (current()) this.emit({ ...metrics, type: 'transcription_metrics', mode: 'live' });
+        },
+      });
+      // Opening and recording run concurrently; send() owns its bounded connection queue.
+      live.ready = Promise.resolve(live.stream.start()).then(() => {
+        if (current()) {
+          live.providerReadyMs = Math.max(0, Math.round(this.now() - live.startedAt));
+          if (this.state === 'recording') this.emit({ type: 'stream_status', state: 'live' });
+        }
+      }).catch(error => this.failLive(live, error));
+    } catch (error) { this.failLive(live, error); }
+  }
+
+  failLive(live, error) {
+    if (this.live !== live || live.signal.aborted || live.error) return;
+    live.error = error ?? Object.assign(new Error(), { code: 'LIVE_TRANSCRIPTION_FAILED' });
+    live.closed = true;
+    live.abort.abort();
+    try { Promise.resolve(live.stream?.close()).catch(() => {}); } catch {}
+  }
+
+  sendLive(pcm) {
+    const live = this.live;
+    if (!pcm.length || !live || live.error || live.signal.aborted) return;
+    if ((this.getSettings() ?? {}).cloudEnabled === false) {
+      this.failLive(live, Object.assign(new Error(), { code: 'CLOUD_DISABLED' }));
+      return;
+    }
+    try {
+      if (live.stream.send(pcm.slice()) !== true) {
+        throw Object.assign(new Error(), { code: 'LIVE_AUDIO_REJECTED' });
+      }
+      live.sentSamples += pcm.length;
+    } catch (error) { this.failLive(live, error); }
+  }
+
+  closeLive(live = this.live) {
+    if (!live) return;
+    if (this.live === live) this.live = null;
+    live.signal.removeEventListener('abort', live.cancel);
+    if (live.closed) return;
+    live.closed = true;
+    live.abort.abort();
+    try { Promise.resolve(live.stream?.close()).catch(() => {}); } catch {}
   }
 
   /** Returns immediately; inference queues are bounded and PCM is copied before returning. */
   accept(pcm) {
     if (!validPcm(pcm) || !this.running) return false;
     if (this.state === 'recording' && this.recorder) {
+      const previousLength = this.recorder.length;
       this.recorder.accept(pcm);
+      // Endpoint/max-duration may accept only part of the last microphone frame.
+      this.sendLive(pcm.subarray(0, this.recorder.length - previousLength));
       if (this.recorder.complete) void this.finish();
       return true;
     }
@@ -195,9 +276,12 @@ export class BatchVoiceController {
     const generation = this.generation;
     const recorder = this.recorder;
     this.recorder = null;
+    const live = this.live;
+    const endpointAt = this.now();
     const metadata = recorder.end();
     const pcm = recorder.take();
     if (!pcm) {
+      this.closeLive(live);
       await this.notice('NO_SPEECH', 'Речь не обнаружена.', metadata);
       await this.resume(generation);
       return false;
@@ -206,18 +290,35 @@ export class BatchVoiceController {
     const settings = { ...this.config, ...(this.getSettings() ?? {}) };
     const autoExecute = settings.voiceAutoExecute ?? settings.autoExecute ?? true;
     if (settings.cloudEnabled === false) {
+      this.closeLive(live);
       pcm.fill(0);
       await this.notice('CLOUD_DISABLED', 'Облачное распознавание выключено в настройках.', metadata);
       if (generation === this.generation) this.status('error', 'Облачное распознавание выключено в настройках.', { code: 'CLOUD_DISABLED', ...metadata });
       return false;
     }
     this.activePcm = pcm;
-    this.status('transcribing', 'Распознаю записанную команду.', metadata);
+    this.status('transcribing', live ? 'Завершаю распознавание команды.' : 'Распознаю записанную команду.', metadata);
     try {
       if (generation !== this.generation || signal.aborted) return false;
-      const mp3 = await this.encodeMp3(pcm, { signal, sampleRate: 16000 });
-      if (generation !== this.generation || signal.aborted) return false;
-      const result = await this.transcribe(mp3, { signal });
+      let result;
+      if (this.utteranceMode === 'live') {
+        if (!live) throw Object.assign(new Error(), { code: 'LIVE_TRANSCRIPTION_UNAVAILABLE' });
+        this.emit({ type: 'stream_status', state: 'finalizing' });
+        await live.ready;
+        if (generation !== this.generation || signal.aborted) return false;
+        if (live.error) throw live.error;
+        result = await live.stream.finish();
+        if (generation !== this.generation || signal.aborted) return false;
+        this.emit({ type: 'transcription_metrics', mode: 'live', model: result?.model,
+          latencyMs: result?.latencyMs, providerReadyMs: live.providerReadyMs ?? null,
+          firstPartialMs: live.firstPartialMs, endToFinalMs: Math.max(0, Math.round(this.now() - endpointAt)),
+          totalMs: Math.max(0, Math.round(this.now() - live.startedAt)), bytes: live.sentSamples * 2 });
+        this.closeLive(live);
+      } else {
+        const mp3 = await this.encodeMp3(pcm, { signal, sampleRate: 16000 });
+        if (generation !== this.generation || signal.aborted) return false;
+        result = await this.transcribe(mp3, { signal });
+      }
       if (generation !== this.generation || signal.aborted) return false;
       const text = stripWakePrefix(typeof result === 'string' ? result : result?.text ?? result?.transcript);
       if (!text || text.length > 1024) {
@@ -251,6 +352,7 @@ export class BatchVoiceController {
       }
       return false;
     } finally {
+      this.closeLive(live);
       pcm.fill(0);
       if (this.activePcm === pcm) this.activePcm = null;
     }

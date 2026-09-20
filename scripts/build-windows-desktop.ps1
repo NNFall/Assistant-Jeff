@@ -40,7 +40,7 @@ foreach ($package in $manifest.packages) {
     }
 }
 $common = @('/nologo','/optimize+','/platform:x64','/codepage:65001',('/reference:' + (Join-Path $framework 'System.dll')),('/reference:' + (Join-Path $framework 'System.Core.dll')),('/reference:' + (Join-Path $framework 'System.Drawing.dll')),('/reference:' + (Join-Path $framework 'System.Windows.Forms.dll')))
-& $compiler @common @references /target:exe "/reference:$(Join-Path $framework 'System.Web.Extensions.dll')" "/reference:$(Join-Path $framework 'System.Management.dll')" "/reference:$(Join-Path $framework 'WPF\WindowsBase.dll')" "/out:$(Join-Path $bin 'JeffWindowsDesktopHelper.exe')" (Join-Path $source 'Helper.cs')
+& $compiler @common @references /target:exe "/reference:$(Join-Path $framework 'System.Web.Extensions.dll')" "/reference:$(Join-Path $framework 'System.Management.dll')" "/reference:$(Join-Path $framework 'WPF\WindowsBase.dll')" "/out:$(Join-Path $bin 'JeffWindowsDesktopHelper.exe')" (Join-Path $source 'Helper.cs') (Join-Path $source 'SystemVolume.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Windows desktop helper compilation failed.' }
 Copy-Item -LiteralPath (Join-Path $repo 'native\desktop-lab\app.config') -Destination (Join-Path $bin 'JeffWindowsDesktopHelper.exe.config') -Force
 Copy-Item -LiteralPath $manifestPath -Destination $bin -Force

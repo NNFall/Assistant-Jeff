@@ -47,7 +47,20 @@ internal sealed class TabGroupState { public int Expected; public bool Complete;
 internal sealed class WindowsDesktopHelper : IDisposable
 {
     private const int MaxWindows = 64, MaxElements = 160, MaxScanned = 480, MaxDepth = 12, ObserveBudgetMs = 1800;
-    private readonly UIA3Automation automation = new UIA3Automation();
+    private UIA3Automation desktopAutomation;
+    private UIA3Automation automation
+    {
+        get
+        {
+            if (desktopAutomation == null)
+            {
+                desktopAutomation = new UIA3Automation();
+                desktopAutomation.ConnectionTimeout = TimeSpan.FromMilliseconds(500);
+                desktopAutomation.TransactionTimeout = TimeSpan.FromMilliseconds(650);
+            }
+            return desktopAutomation;
+        }
+    }
     private readonly int sessionId = Process.GetCurrentProcess().SessionId;
     private readonly int ownPid = Process.GetCurrentProcess().Id;
     private readonly int ownerPid;
@@ -69,8 +82,6 @@ internal sealed class WindowsDesktopHelper : IDisposable
     private WindowsDesktopHelper(int excludedOwner, int restrictedFixture)
     {
         ownerPid = excludedOwner; fixturePid = restrictedFixture;
-        automation.ConnectionTimeout = TimeSpan.FromMilliseconds(500);
-        automation.TransactionTimeout = TimeSpan.FromMilliseconds(650);
         if (fixturePid > 0)
         {
             // The fixture restriction exists only to test the real backend
@@ -571,6 +582,10 @@ internal sealed class WindowsDesktopHelper : IDisposable
         // Resolve exclusively from a new observation; never execute a stale
         // AutomationElement retained from the model's earlier observation.
         var before = Observe(null, false);
+        // A changed or truncated observation can legitimately omit the old
+        // target. Classify the stale full-snapshot request before looking it up,
+        // so callers can re-observe after a definite pre-effect rejection.
+        if (expectedWindow == null && !String.Equals(expected, (string)before["version"], StringComparison.Ordinal)) throw new DesktopError("STALE_SNAPSHOT");
         DesktopTarget target;
         if (!observed.TryGetValue(targetId, out target)) throw new DesktopError("UNKNOWN_TARGET");
         if (expectedWindow != null)
@@ -578,7 +593,6 @@ internal sealed class WindowsDesktopHelper : IDisposable
             if (target.Element != null) throw new DesktopError("WINDOW_VERSION_REQUIRES_WINDOW_TARGET");
             if (!String.Equals(expectedWindow, Field(target.State, "stateVersion"), StringComparison.Ordinal)) throw new DesktopError("STALE_SNAPSHOT");
         }
-        else if (!String.Equals(expected, (string)before["version"], StringComparison.Ordinal)) throw new DesktopError("STALE_SNAPSHOT");
         if (!target.Capabilities.Contains(operation)) throw new DesktopError("OPERATION_DENIED");
         var window = Revalidate(target.Window); var prior = target.State; bool effectAttempted = operation != "inspect";
         if (target.Element == null)
@@ -648,6 +662,11 @@ internal sealed class WindowsDesktopHelper : IDisposable
     }
     private object Dispatch(string method, Dictionary<string, object> args)
     {
+        if (method == "volume_get" || method == "volume_set")
+        {
+            if (fixturePid > 0) throw new DesktopError("SYSTEM_VOLUME_UNAVAILABLE_IN_FIXTURE");
+            return SystemVolume.Execute(method, args);
+        }
         if (method == "observe")
         {
             object value; bool hasWindow = args.TryGetValue("windowId", out value);
@@ -664,7 +683,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
         while ((ch = Console.In.Read()) != -1 && ch != '\n') { if (text.Length < 65536) text.Append((char)ch); else overflow = true; }
         if (ch == -1 && text.Length == 0) return null; return overflow ? "" : text.ToString().TrimEnd('\r');
     }
-    public void Dispose() { automation.Dispose(); }
+    public void Dispose() { if (desktopAutomation != null) desktopAutomation.Dispose(); }
     [STAThread] private static int Main(string[] args)
     {
         Console.InputEncoding = new UTF8Encoding(false); Console.OutputEncoding = new UTF8Encoding(false);

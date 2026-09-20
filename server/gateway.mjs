@@ -2,6 +2,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
+import { attachLiveTranscription } from './gemini-live.mjs';
 
 const MAX_AUDIO_BYTES = 1024 * 1024;
 const MAX_TRANSCRIBE_BODY = 2 * 1024 * 1024;
@@ -69,6 +70,8 @@ export function createGatewayServer({
   apiKey = process.env.GEMINI_API_KEY,
   model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
   transcribeModel = process.env.GEMINI_TRANSCRIBE_MODEL || 'gemini-3.5-transcribe',
+  liveModel = process.env.GEMINI_LIVE_TRANSCRIBE_MODEL || 'gemini-3.5-transcribe-live',
+  liveOptions = {},
   fetchImpl = globalThis.fetch,
   chatTimeoutMs = 25000,
   transcribeTimeoutMs = 45000,
@@ -79,7 +82,7 @@ export function createGatewayServer({
   const server = http.createServer(async (req, res) => {
     const given = Buffer.from(req.headers.authorization || '');
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) return reply(res, 401, { error: 'Unauthorized' });
-    if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'assistant-jeff', model, transcribeModel });
+    if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'assistant-jeff', model, transcribeModel, liveModel });
     const transcribe = req.url === '/transcribe';
     if (req.method !== 'POST' || (!transcribe && req.url !== '/chat')) return reply(res, 404, { error: 'Not found' });
     if (active >= 2) return reply(res, 429, { error: 'Busy' });
@@ -134,6 +137,8 @@ export function createGatewayServer({
   });
   server.requestTimeout = 60000;
   server.headersTimeout = 10000;
+  attachLiveTranscription(server, {...liveOptions, token, apiKey, model:liveModel,
+    acquire:()=>{if(active>=2)return false;active++;return true;},release:()=>{active--;}});
   return server;
 }
 

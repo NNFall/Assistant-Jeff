@@ -6,6 +6,12 @@ const riskyLabel=/(?:\b(?:delete|erase|remove|send|submit|pay|purchase|buy|insta
 const exactAuthLabel=/^\s*вход[.!…]?\s*$/iu;
 const verbs={inspect:'Прочитать элементы окна',activate:'Открыть / показать окно на переднем плане',minimize:'Свернуть окно',maximize:'Развернуть окно на весь экран',restore:'Восстановить обычный размер окна',close:'Закрыть окно',select:'Выбрать элемент',invoke:'Нажать кнопку',toggle:'Переключить состояние',expand:'Раскрыть',collapse:'Свернуть список'};
 const digest=value=>createHash('sha256').update(value).digest('hex').slice(0,24);
+const pureWindowOperations=new Set(['activate','minimize','maximize','restore','close']);
+export function validateWindowScope(scope){
+  if(scope===undefined)return null;
+  if(!scope||typeof scope!=='object'||Array.isArray(scope)||Object.keys(scope).some(key=>key!=='operation')||!pureWindowOperations.has(scope.operation))throw Object.assign(new Error('WINDOWS_INVALID_SCOPE'),{code:'WINDOWS_INVALID_SCOPE'});
+  return {operation:scope.operation};
+}
 export function replacementLiteral(command){
   const match=/^\s*замени текст на (?:«([^»]*)»|"([^"\n]*)")[.!]?\s*$/iu.exec(String(command));
   return match?(match[1]??match[2]):null;
@@ -30,8 +36,9 @@ export function validateWindowsSnapshot(value){
 }
 
 /** Hierarchical access: choose a window, then its observed operations/controls. */
-export function buildWindowsCandidates(snapshot,command,{page=0,apps=[]}={}){
+export function buildWindowsCandidates(snapshot,command,{page=0,apps=[],scope}={}){
   validateWindowsSnapshot(snapshot);
+  const windowScope=validateWindowScope(scope);
   const windowIds=new Set(snapshot.windows.map(w=>w.id));
   const words=String(command).toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu)??[];
   const selected=snapshot.facts?.selectedWindowId;
@@ -39,8 +46,9 @@ export function buildWindowsCandidates(snapshot,command,{page=0,apps=[]}={}){
   const literal=replacementLiteral(command);
   for(const e of snapshot.elements){
     const isWindow=windowIds.has(e.id);
+    if(windowScope&&!isWindow)continue;
     for(const operation of e.capabilities){
-      if(isWindow&&(e.id===selected?operation==='inspect':operation!=='inspect'))continue;
+      if(windowScope?operation!==windowScope.operation:isWindow&&(e.id===selected?operation==='inspect':operation!=='inspect'))continue;
       // High-impact controls require a separate explicitly reviewed workflow.
       if(!isWindow&&(riskyLabel.test(e.name??e.label)||exactAuthLabel.test(e.name??e.label)))continue;
       const owner=snapshot.windows.find(w=>w.id===(isWindow?e.id:e.windowId));
@@ -60,25 +68,31 @@ export function buildWindowsCandidates(snapshot,command,{page=0,apps=[]}={}){
   }
   for(const app of apps){
     if(!app||!/^app_[a-f0-9]{16,64}$/.test(app.id??'')||typeof app.name!=='string'||!app.name.trim()||app.name.length>200||typeof app.processName!=='string')continue;
+    // Open/show may need a discovered app when no matching process window exists.
+    // Preserve the complete catalog: lexical filtering would lose spoken aliases.
+    if(windowScope&&windowScope.operation!=='activate')continue;
     if(snapshot.windows.some(w=>w.processName.toLocaleLowerCase()===app.processName.toLocaleLowerCase()))continue;
     const label=`Запустить установленное приложение: ${app.name}`;
     const relevance=words.reduce((sum,w)=>sum+(label.toLocaleLowerCase().includes(w)?3:0),0);
     actions.push({id:'a_'+digest(snapshot.version+'\0'+app.id+'\0launch'),targetId:app.id,operation:'launch',label,score:relevance,isWindow:false});
   }
-  const inspections=actions.filter(a=>a.isWindow&&a.operation==='inspect');
-  const rest=actions.filter(a=>!(a.isWindow&&a.operation==='inspect')).sort((a,b)=>b.score-a.score||a.id.localeCompare(b.id));
-  const slots=Math.max(1,96-inspections.length);
+  // Preserve every observed window on every page, including the direct effects
+  // in a scoped request. Only additional app/control candidates are paginated.
+  const windows=actions.filter(a=>a.isWindow&&(windowScope||a.operation==='inspect'));
+  const rest=actions.filter(a=>!(a.isWindow&&(windowScope||a.operation==='inspect'))).sort((a,b)=>b.score-a.score||a.id.localeCompare(b.id));
+  const slots=Math.max(1,96-windows.length);
   const pages=Math.max(1,Math.ceil(rest.length/slots));
   const index=Math.max(0,Math.min(pages-1,Number.isSafeInteger(page)?page:0));
-  const candidates=[...inspections,...rest.slice(index*slots,(index+1)*slots)].map(({score,isWindow,...a})=>a);
+  const candidates=[...windows,...rest.slice(index*slots,(index+1)*slots)].map(({score,isWindow,...a})=>a);
   return {candidates,page:index,pages,total:actions.length,omitted:actions.length-candidates.length};
 }
 
-export function windowsObservation(snapshot,{omitted=0,candidates=[]}={}){
+export function windowsObservation(snapshot,{omitted=0,candidates=[],scope}={}){
+  const windowScope=validateWindowScope(scope);
   const selected=snapshot.windows.find(w=>w.id===snapshot.facts?.selectedWindowId);
   const windows=snapshot.windows.map(w=>({id:w.id,title:w.title,app:w.processName,minimized:w.minimized,maximized:w.maximized,active:w.active,...(w.keyboardLanguage?{keyboardLanguage:w.keyboardLanguage,availableKeyboardLanguages:w.availableKeyboardLanguages}:{})}));
   const preferred=new Set(candidates.map(c=>c.targetId));
-  const controls=snapshot.elements.filter(e=>!windows.some(w=>w.id===e.id)).sort((a,b)=>Number(preferred.has(b.id))-Number(preferred.has(a.id))||Number(b.selected===true)-Number(a.selected===true)).map(e=>({
+  const controls=snapshot.elements.filter(e=>!windowScope&&!windows.some(w=>w.id===e.id)).sort((a,b)=>Number(preferred.has(b.id))-Number(preferred.has(a.id))||Number(b.selected===true)-Number(a.selected===true)).map(e=>({
     id:e.id,name:(e.name??e.label).slice(0,200),role:e.role,
     ...(typeof e.selected==='boolean'?{selected:e.selected}:{}),
     ...(e.toggleState!=null?{toggleState:e.toggleState}:{}),...(e.expandState!=null?{expandState:e.expandState}:{}),
@@ -89,7 +103,8 @@ export function windowsObservation(snapshot,{omitted=0,candidates=[]}={}){
   let omittedControls=0;
   const render=()=>[
     `Current windows: ${JSON.stringify(windows)}`,
-    `Inspected window: ${selected?selected.title:'none; inspect the relevant window to see its controls.'}`,
+    ...(windowScope?[`Pure window operation: ${windowScope.operation}. Supplied actions directly target all eligible observed windows; no inspect access step is required. Window identity and state come from the current native inventory.`]:[]),
+    ...(windowScope?[]:[`Inspected window: ${selected?selected.title:'none; inspect the relevant window to see its controls.'}`]),
     `Observed controls: ${JSON.stringify(controls)}`,
     `Provider: ${snapshot.metadata?.provider??'Windows UI Automation'}. ${snapshot.metadata?.truncated?'Observation is truncated. ':''}${omittedControls?`${omittedControls} control descriptions omitted from this summary. `:''}${omitted?`${omitted} further action options exist; absent candidate does not prove absent target. `:''}Only role TabItem is an existing tab; hyperlinks and bookmarks are not tabs. Tab order is visual order among the observed tab group, not candidate-array order. Partial coverage cannot prove the first matching tab in the whole group. An inspect action only reads controls; it does not focus, open a tab or start playback.`,
   ].join('\n');

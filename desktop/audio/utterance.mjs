@@ -3,6 +3,11 @@ export const WAKE_FRAME_SAMPLES = 1280;
 export const PRE_ROLL_SAMPLES = Math.round(SAMPLE_RATE * 0.7);
 export const MAX_CHUNK_SAMPLES = SAMPLE_RATE;
 export const MAX_UTTERANCE_SAMPLES = SAMPLE_RATE * 30;
+export const DEFAULT_SILENCE_MS = 2000;
+
+export function silenceDurationMs(value) {
+  return Math.max(2000, Math.min(3000, Number.isFinite(value) ? value : DEFAULT_SILENCE_MS));
+}
 
 export function validPcm(chunk) {
   return chunk instanceof Int16Array && chunk.length > 0 && chunk.length <= MAX_CHUNK_SAMPLES;
@@ -59,7 +64,7 @@ export class SampleRing {
 
 /** Locally retains one bounded utterance; pre-roll does not count as command speech. */
 export class UtteranceRecorder {
-  constructor({ preRoll = new Int16Array(), noiseFloor, silenceMs = 2500 } = {}) {
+  constructor({ preRoll = new Int16Array(), noiseFloor, silenceMs = DEFAULT_SILENCE_MS } = {}) {
     this.data = new Int16Array(MAX_UTTERANCE_SAMPLES);
     const prefix = preRoll.subarray(Math.max(0, preRoll.length - PRE_ROLL_SAMPLES));
     this.data.set(prefix);
@@ -69,8 +74,7 @@ export class UtteranceRecorder {
     this.speechSamples = 0;
     this.silenceSamples = 0;
     this.threshold = voiceThreshold(noiseFloor);
-    this.silenceLimit = Math.round(SAMPLE_RATE * Math.max(2000, Math.min(3000,
-      Number.isFinite(silenceMs) ? silenceMs : 2500)) / 1000);
+    this.silenceLimit = Math.round(SAMPLE_RATE * silenceDurationMs(silenceMs) / 1000);
     this.complete = false;
     this.reason = null;
   }

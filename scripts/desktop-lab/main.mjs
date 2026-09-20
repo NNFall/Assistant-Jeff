@@ -7,6 +7,8 @@ import {WindowsDesktop} from '../windows-desktop/controller.mjs';
 import {WindowsBridge} from '../windows-desktop/bridge.mjs';
 import {InstalledApps} from '../../desktop/automation/windows-apps.mjs';
 import {UnifiedCommands} from '../../desktop/automation/assistant-commands.mjs';
+import {interpretAssistantCommand} from '../../desktop/providers/assistant-intent.mjs';
+import {createSystemTools} from '../../desktop/automation/system-tools.mjs';
 import {Store} from '../../desktop/core/index.mjs';
 import {readProtected} from '../../desktop/secrets.mjs';
 import {GeminiGateway} from '../../desktop/providers/gemini.mjs';
@@ -24,12 +26,20 @@ app.setName('Assistant Jeff');
 app.setPath('userData',smoke?path.join(root,'work','windows-desktop','ui-smoke-profile'):paths.data);
 let window,tray,store,commands,voice,gateway,settings,poll,quitting=false,allowCapture=false;
 let voiceLogQueue=Promise.resolve();
-const progress=value=>{if(window&&!window.isDestroyed())window.webContents.send('lab:progress',value);};
+const progress=value=>{
+  const parent=commands?.activeRunId;
+  const visible=parent&&value.runId&&value.runId!==parent?{...value,childRunId:value.runId,runId:parent}:value;
+  if(window&&!window.isDestroyed())window.webContents.send('lab:progress',visible);
+};
 function voiceEvent(value){
   if(value.type==='status'&&['stopped','error'].includes(value.state))allowCapture=false;
   if(window&&!window.isDestroyed())window.webContents.send('lab:voice',value);
+  // Interim hypotheses are visible immediately; only the final command belongs
+  // in the persistent journal. Latency events retain the streaming measurements.
+  if(value.type==='transcript'&&value.final!==true)return;
   // Audio bytes are never stored. Command journals carry their own complete traces.
-  const item=value.type==='speech'?{type:value.type,id:value.id,bytes:value.wav.byteLength}:value.type==='result'?{type:value.type,runId:value.report.runId,reason:value.report.reason}:value;
+  const context={source:value.source,operationId:value.operationId};
+  const item=value.type==='speech'?{...context,type:value.type,id:value.id,bytes:value.wav.byteLength}:value.type==='result'?{...context,type:value.type,runId:value.report.runId,reason:value.report.reason,ok:value.report.ok}:value;
   const line=JSON.stringify(redact({at:new Date().toISOString(),...item}))+'\n';
   voiceLogQueue=voiceLogQueue.then(async()=>{const dir=path.join(paths.data,'logs','voice');await fs.promises.mkdir(dir,{recursive:true});await fs.promises.appendFile(path.join(dir,`${new Date().toISOString().slice(0,10)}.jsonl`),line);}).catch(()=>{});
 }
@@ -52,7 +62,20 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
   app.on('second-instance',()=>{window?.show();window?.focus();});
   app.whenReady().then(async()=>{
     settings=initializeRuntime(paths,root,{isolated});store=initializeStore();gateway=new GeminiGateway(paths.data);
-    commands=new UnifiedCommands({desktop:lab,store,chat:(text,options)=>gateway.chat(text,options),progress,directory:paths.logs});
+    const systemTools=createSystemTools({bridge:lab.bridge,minimizeAssistant:async({signal}={})=>{
+      signal?.throwIfAborted();
+      if(!window||window.isDestroyed())throw Object.assign(new Error(),{code:'ASSISTANT_WINDOW_UNAVAILABLE'});
+      const before={minimized:window.isMinimized()};
+      if(!before.minimized)await new Promise(resolve=>{
+        let timer;const finish=()=>{clearTimeout(timer);window?.removeListener('minimize',finish);resolve();};
+        window.once('minimize',finish);timer=setTimeout(finish,750);window.minimize();
+      });
+      const after={minimized:!!window&&!window.isDestroyed()&&window.isMinimized()};
+      return {verified:after.minimized,effectAttempted:!before.minimized,before,after};
+    }});
+    commands=new UnifiedCommands({desktop:lab,store,chat:(text,options)=>gateway.chat(text,options),progress,directory:paths.logs,
+      interpret:async(text,options)=>interpretAssistantCommand(text,{...options,apiKey:await lab.apiKeyResolver()}),
+      executeSystem:(intent,options)=>systemTools.executeSystemTool(intent,options)});
     voice=new VoiceSession({paths,encoder:new Mp3Encoder({executablePath:paths.ffmpeg}),gateway,
       denis:new DenisVoice({executablePath:paths.piper,modelPath:paths.denis}),commands,getSettings:()=>settings,emit:voiceEvent});
     window=new BrowserWindow({width:1100,height:800,minWidth:760,minHeight:620,title:'Assistant Jeff',icon:path.join(root,'desktop','assets','icon.png'),
@@ -65,8 +88,8 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
     for(const [name,handler] of Object.entries({start:()=>lab.start(),state:()=>lab.state(),
       run:payload=>voice.runTyped(payload),
       stop:()=>{commands.stop();return voice.stop();},
-      history:()=>listRuns({directory:paths.logs,activeRunId:commands.activeRunId??lab.activeRunId}),
-      readRun:payload=>readRun(payload?.runId,{directory:paths.logs,activeRunId:commands.activeRunId??lab.activeRunId}),
+      history:()=>listRuns({directory:paths.logs,activeRunIds:[commands.activeRunId,lab.activeRunId].filter(Boolean)}),
+      readRun:payload=>readRun(payload?.runId,{directory:paths.logs,activeRunIds:[commands.activeRunId,lab.activeRunId].filter(Boolean)}),
       openLogs:async()=>{fs.mkdirSync(paths.logs,{recursive:true});const error=await shell.openPath(paths.logs);return error?{error:'LOG_DIRECTORY_OPEN_FAILED'}:{opened:true};},
       voiceStatus:async()=>({...await voice.status(),version:app.getVersion()}),voiceStart:async payload=>{const result=await voice.start(payload);allowCapture=result.ok===true;return result;},
       voiceStop:()=>{allowCapture=false;return voice.stop();},voiceActivate:()=>voice.activate(),voiceFinish:()=>voice.finish(),

@@ -14,7 +14,7 @@ async function fixture(t,overrides={}){
   t.after(()=>rm(models,{recursive:true,force:true}));
   await Promise.all(['melspectrogram.onnx','embedding_model.onnx','hey_jarvis_v0.1.onnx'].map(name=>writeFile(path.join(models,name),'')));
   const events=[],calls={commands:[],speech:[],encodes:[],transcriptions:[],stops:0};
-  const settings={cloudEnabled:true,voiceAutoExecute:true,denisReply:true,activationBeep:false};
+  const settings={cloudEnabled:true,voiceAutoExecute:true,denisReply:true,activationBeep:false,transcriptionMode:'batch'};
   const wake={accept:async()=>({triggered:false}),reset(){},close:async()=>{}};
   const gateway={available:async()=>true,transcribe:async(mp3,options)=>{calls.transcriptions.push({mp3,options});return {text:'Джарвис, открой диспетчер задач.',model:'mock',latencyMs:1};}};
   const encoder={available:async()=>true,encode:async(pcm,options)=>{calls.encodes.push({pcm,options});return Buffer.from('mock-mp3');}};
@@ -29,11 +29,23 @@ function recordSpeech(session){
   for(let index=0;index<4;index++)assert.equal(session.accept(new Int16Array(1280).fill(2000)),true);
 }
 
+function installLive(x,{final}={}){
+  const streams=[];
+  x.gateway.createTranscriptionStream=options=>{
+    const stream={options,audio:[],finishes:0,closes:0,start:async()=>{},send(pcm){this.audio.push(pcm.slice());return true;},
+      async finish(){this.finishes++;return final?final.promise:{text:'Джарвис, открой диспетчер задач.',model:'live-fixture',latencyMs:1};},
+      close(){this.closes++;}};
+    streams.push(stream);return stream;
+  };
+  return streams;
+}
+
 test('provider status checks the same versioned Jarvis filename as WakeDetector',async t=>{
   const x=await fixture(t);
   const status=await x.session.status();
   assert.equal(status.providers.wake,true);
   assert.equal(status.providers.gemini,true);
+  assert.equal(status.silenceMs,2000);
 });
 
 test('only a finished transcript runs a command, with wake prefix removed',async t=>{
@@ -135,7 +147,7 @@ test('spoken failure and uncertain completion never assert an independently veri
   assert.match(spokenResult({ok:true,reason:'goal_verified'}),/Задача выполнена/u);
   assert.match(spokenResult({ok:false,reason:'low_confidence'}),/не уверен/iu);
   assert.match(spokenResult({ok:false,reason:'aborted'}),/остановлено/u);
-  assert.match(spokenResult({ok:false,reason:'goal_not_verified',completed:[{operation:'minimize',outcome:'verified'}]}),/завершение задачи не подтверждено/u);
+  assert.match(spokenResult({ok:false,reason:'goal_not_verified',completed:[{operation:'minimize',outcome:'verified'}]}),/не подтвержд[её]н/u);
   assert.doesNotMatch(spokenResult({ok:false,reason:'LOG_WRITE_FAILED',message:'Готово. Задача выполнена.'}),/Задача выполнена/u);
   assert.doesNotMatch(spokenResult({ok:true,reason:'goal_observed'}),/Задача выполнена/u);
 });
@@ -306,4 +318,60 @@ test('voice execution throwing on abort still produces one safe terminal report 
   const reports=x.events.filter(event=>event.type==='result');assert.equal(reports.length,1);
   assert.equal(reports[0].report.reason,'aborted');assert.equal(reports[0].report.error,'ABORTED');
   assert.equal(JSON.stringify(reports).includes('PRIVATE'),false);assert.equal(x.calls.speech.length,0);
+});
+
+test('live is the default, needs no MP3 encoder and executes only the final stream result',async t=>{
+  const x=await fixture(t),final=defer(),streams=installLive(x,{final});
+  delete x.settings.transcriptionMode;x.settings.denisReply=false;x.encoder.available=async()=>false;
+  const started=await x.session.start({mode:'manual'});
+  assert.equal(started.ok,true);assert.equal(started.providers.encoder,false);assert.equal(started.providers.live,true);assert.equal(started.silenceMs,2000);
+  recordSpeech(x.session);
+  streams[0].options.onTranscript({text:'Джарвис, сверни окно',final:true});
+  assert.equal(x.calls.commands.length,0);
+  assert.equal(x.events.find(event=>event.type==='transcript').final,false);
+  const finishing=x.session.batch.finish();await until(()=>streams[0].finishes===1);
+  assert.equal(x.calls.commands.length,0);
+  final.resolve({text:'Джарвис, открой диспетчер задач.'});await finishing;
+  assert.equal(x.calls.commands.length,1);assert.equal(x.calls.commands[0].command,'открой диспетчер задач.');
+  assert.equal(x.calls.encodes.length,0);assert.equal(x.calls.transcriptions.length,0);assert.equal(streams[0].closes,1);
+  assert.equal(x.events.filter(event=>event.type==='transcript'&&event.final).length,1);
+});
+
+test('live wake remains paused throughout narration and Stop aborts command and playback',async t=>{
+  const x=await fixture(t),streams=installLive(x);x.settings.transcriptionMode='live';
+  await x.session.start({mode:'wake'});assert.equal(streams.length,0);
+  x.session.activate();recordSpeech(x.session);
+  const finishing=x.session.batch.finish();await until(()=>x.events.some(event=>event.type==='speech'));
+  assert.equal(streams[0].closes,1);assert.equal(streams[0].options.signal.aborted,true);
+  assert.equal(x.session.accept(new Int16Array(1280).fill(2000)),false);assert.equal(x.session.activate().ok,false);
+  const commandSignal=x.calls.commands[0].signal;assert.equal(commandSignal.aborted,false);
+  await x.session.stop();await finishing;
+  assert.equal(commandSignal.aborted,true);assert.equal(x.session.playback,null);assert.equal(x.session.state,'stopped');
+  assert.equal(x.calls.commands.length,1);assert.equal(streams.length,1);
+});
+
+test('stopping live finalization cannot publish a late transcript, execute or narrate',async t=>{
+  const x=await fixture(t),final=defer(),streams=installLive(x,{final});x.settings.transcriptionMode='live';
+  await x.session.start({mode:'manual'});recordSpeech(x.session);
+  const finishing=x.session.batch.finish();await until(()=>streams[0].finishes===1);
+  await x.session.stop();const stoppedAt=x.events.length;
+  streams[0].options.onTranscript({text:'поздняя команда'});final.resolve({text:'поздняя команда'});await finishing;
+  assert.equal(streams[0].options.signal.aborted,true);assert.equal(streams[0].closes,1);
+  assert.equal(x.events.length,stoppedAt);assert.equal(x.calls.commands.length,0);assert.equal(x.calls.speech.length,0);
+});
+
+test('an explicitly selected batch fallback still works when streaming is unavailable',async t=>{
+  const x=await fixture(t);x.settings.transcriptionMode='live';
+  const unavailable=await x.session.start({mode:'manual'});
+  assert.equal(unavailable.ok,false);assert.equal(unavailable.code,'LIVE_TRANSCRIPTION_UNAVAILABLE');assert.equal(x.session.state,'stopped');
+  x.settings.transcriptionMode='batch';x.settings.denisReply=false;
+  assert.equal((await x.session.start({mode:'manual'})).ok,true);
+  recordSpeech(x.session);await x.session.batch.finish();
+  assert.equal(x.calls.commands.length,1);assert.equal(x.calls.encodes.length,1);assert.equal(x.calls.transcriptions.length,1);
+});
+
+test('reported silence duration matches the recorder setting',async t=>{
+  const x=await fixture(t);x.settings.voiceSilenceMs=2300;
+  const started=await x.session.start({mode:'manual'});
+  assert.equal(started.silenceMs,2300);assert.equal(x.session.batch.recorder.silenceLimit,36800);
 });

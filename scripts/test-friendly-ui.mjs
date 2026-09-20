@@ -13,6 +13,7 @@ import {GeminiGateway} from '../desktop/providers/gemini.mjs';
 import {DenisVoice} from '../desktop/audio/denis.mjs';
 import {Mp3Encoder} from '../desktop/audio/mp3.mjs';
 import {RunJournal} from './desktop-lab/journal.mjs';
+import {UnifiedCommands} from '../desktop/automation/assistant-commands.mjs';
 
 if(!process.argv.includes('--mock-only')){
   console.error('Requires --mock-only. This harness must never use live providers.');
@@ -24,7 +25,8 @@ async function main(){
   const directory=path.join(root,'work',`ui-smoke-friendly-${Date.now()}`);
   const data=path.join(directory,'data');
   const checks=[],speech=[],screenshots=[],blocked={desktop:0,launch:0,network:0,microphone:0};
-  let nextTranscript=null,syntheticTranscriptions=0;
+  let nextTranscript=null,syntheticTranscriptions=0,desktopExecutions=0;
+  const clarificationCommand='Напомни завтра проверить чай.';
   const controls=new Map();
   const snapshot={version:'fixture-v1',windows:[],elements:[],facts:{},metadata:{fixture:true}};
   const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -70,8 +72,17 @@ async function main(){
     };
     InstalledApps.prototype.launch=forbidden('launch');
     InstalledApps.prototype.list=async()=>[];
+    const runCommands=UnifiedCommands.prototype.run;
+    UnifiedCommands.prototype.run=function(payload){
+      this.interpret=async(text,{onEvent})=>{
+        await onEvent({phase:'intent_request',kind:'intent_route',callIndex:0,request:{state:{latest_user_command:text}}});
+        const result=text===clarificationCommand?{route:'reminder',needsClarification:true,message:'Во сколько завтра?',clarification:{field:'time',day:'завтра',text:'проверить чай'}}:{route:'desktop',decision:{choice:'desktop',confidence:.99,probability:.99}};
+        await onEvent({phase:'intent_response',kind:'intent_route',callIndex:0,response:result,latencyMs:1});return result;
+      };
+      return runCommands.call(this,payload);
+    };
     GeminiGateway.prototype.available=async()=>true;
-    for(const name of ['connect','request','chat'])GeminiGateway.prototype[name]=forbidden('network');
+    for(const name of ['connect','request','chat','createTranscriptionStream'])GeminiGateway.prototype[name]=forbidden('network');
     GeminiGateway.prototype.transcribe=async()=>{
       assert.notEqual(nextTranscript,null,'Unexpected transcription attempt');
       const text=nextTranscript;nextTranscript=null;syntheticTranscriptions++;
@@ -89,6 +100,7 @@ async function main(){
     ({lab}=await import('./desktop-lab/main.mjs'));
     lab.run=async function({command,signal}){
       const control=controls.get(command);assert.ok(control,`Unregistered fixture command: ${command}`);
+      desktopExecutions++;
       this.running=true;
       const started=performance.now();
       const journal=await RunJournal.create(command,{directory:this.directory});
@@ -123,12 +135,15 @@ async function main(){
     async function submit(command,reason,options={}){
       const control={reason,...options};controls.set(command,control);
       await js(`document.getElementById('command').value=${JSON.stringify(command)};document.getElementById('command').dispatchEvent(new Event('input'));document.getElementById('run').click();`);
-      await until(()=>control.started,'mock command started');
+      await until(()=>control.started&&(control.holdProgress||typeof control.release==='function'),'mock command started');
       assert.equal(await js('document.getElementById("run").disabled && document.getElementById("command").disabled && !document.getElementById("stop").hidden && document.getElementById("task-card").getAttribute("aria-busy")==="true"'),true);
       return control;
     }
     async function settled(){await until(()=>js('!document.getElementById("run").disabled && document.getElementById("task-card").getAttribute("aria-busy")==="false"'),'task and narration settled');}
-    const success=await submit('Проверка успешной задачи.','goal_verified');success.release();await settled();
+    const success=await submit('Проверка успешной задачи.','goal_verified');
+    await until(()=>js('document.getElementById("activity").textContent==="Смотрю открытые приложения"'),'desktop child progress under semantic parent');
+    pass('Nested desktop progress remains visible under the semantic parent task');
+    success.release();await settled();
     assert.equal(await js('document.getElementById("task-card").dataset.tone'),'success');
     assert.match(await js('document.getElementById("result-message").textContent'),/выполнена/u);
     pass('Typed success: run → busy → confirmed result');
@@ -140,7 +155,7 @@ async function main(){
     assert.match(await js('document.getElementById("result-message").textContent'),/администратора/u);
     assert.equal(await js('document.getElementById("run").disabled'),true);
     assert.match(await js('document.getElementById("footer-status").textContent'),/микрофон выключен/ui);
-    assert.match(speech.at(-1),/Не получилось.*администратора/u);
+    assert.equal(speech.at(-1),'Не получилось открыть приложение.');
     assert.equal(await js('window.__smoke.speechEvents.at(-1).source'),'typed');
     pass('Typed failure: useful visible reason and speech delivered with microphone off');
     await js('window.__smoke.autoEnd=true;window.__smoke.audios.at(-1).onended?.();');await settled();
@@ -177,16 +192,47 @@ async function main(){
     pass('Late progress and speech status cannot revive a finished task');
     await js('window.__smoke.autoEnd=true;document.getElementById("voice-beep").checked=false;document.getElementById("voice-beep").dispatchEvent(new Event("change"));');
     await until(()=>js('window.lab.voiceStatus().then(status=>status.settings.activationBeep===false)'),'beep disabled for synthetic capture');
-    async function recordSynthetic(text,{speechFrames=true}={}){
+    assert.equal(await js('document.getElementById("voice-mode").value'),'live');
+    for(const mode of ['batch','live','batch']){
+      await js(`document.getElementById('voice-mode').value=${JSON.stringify(mode)};document.getElementById('voice-mode').dispatchEvent(new Event('change'));`);
+      await until(()=>js(`window.lab.voiceStatus().then(status=>status.settings.transcriptionMode===${JSON.stringify(mode)})`),'transcription mode persisted');
+      assert.equal(await js('document.getElementById("voice-mode").value'),mode);
+    }
+    pass('Settings: live defaults and live/batch selection round-trips through main');
+    const executionsBeforePartialStop=desktopExecutions;
+    await js('document.getElementById("voice-manual").click();');
+    await until(()=>js('document.getElementById("voice-state").textContent==="Слушаю команду"'),'capture for partial cancellation');
+    window.webContents.send('lab:voice',{type:'transcript',source:'voice',text:'Незаконченная команда',final:false});
+    await until(()=>js('!document.getElementById("voice-transcript").hidden'),'partial caption before Stop');
+    await js('document.getElementById("stop").click();');
+    await until(()=>js('!document.getElementById("voice-manual").disabled'),'capture cancelled');
+    window.webContents.send('lab:voice',{type:'transcript',source:'voice',text:'Запоздалая команда',final:false});
+    await pause(80);
+    assert.equal(await js('document.getElementById("voice-transcript").hidden'),true);assert.equal(desktopExecutions,executionsBeforePartialStop);
+    pass('Stop clears unfinished caption and rejects late partial speech without execution');
+    async function recordSynthetic(text,{speechFrames=true,preview=false}={}){
       nextTranscript=text;
       await js('document.getElementById("voice-manual").click();');
       await until(()=>js('document.getElementById("voice-state").textContent==="Слушаю команду"'),'synthetic manual recording started');
+      assert.equal(await js('document.getElementById("voice-transcript").hidden'),true,'New capture clears the previous caption');
+      if(preview){
+        const before=await js('document.getElementById("command").value'),executions=desktopExecutions;
+        window.webContents.send('lab:voice',{type:'stream_status',source:'voice',state:'connecting'});
+        await until(()=>js('document.getElementById("voice-status").textContent.includes("Уже можно говорить")'),'friendly connecting phase');
+        window.webContents.send('lab:voice',{type:'stream_status',source:'voice',state:'live'});
+        window.webContents.send('lab:voice',{type:'transcript',source:'voice',text:'Промежуточная фраза',final:false});
+        await until(()=>js('document.getElementById("voice-transcript").textContent==="Промежуточная фраза"'),'partial caption shown');
+        assert.equal(await js('document.getElementById("command").value'),before);assert.equal(desktopExecutions,executions);
+        assert.equal(await js('document.getElementById("run").disabled'),true);
+        assert.equal(await js('document.getElementById("voice-mode").disabled'),true);
+        pass('Partial speech is visible while executable command stays untouched and execution remains blocked');
+      }
       if(speechFrames)await js('for(let i=0;i<4;i++)window.lab.audioChunk(new Int16Array(1280).fill(2000));void 0;');
       await js('document.getElementById("voice-finish").click();');
     }
     const voiceCommand='Проверка остановки голосовой задачи.';
     const voiceControl={reason:'goal_verified'};controls.set(voiceCommand,voiceControl);
-    await recordSynthetic(voiceCommand);await until(()=>voiceControl.started,'synthetic voice command executing');
+    await recordSynthetic(voiceCommand,{preview:true});await until(()=>voiceControl.started,'synthetic voice command executing');
     assert.equal(await js('document.getElementById("task-card").getAttribute("aria-busy")'),'true');
     const playsBeforeVoiceStop=await js('window.__smoke.plays');
     await js('document.getElementById("stop").click();');await settled();
@@ -220,7 +266,7 @@ async function main(){
     assert.equal(controls.size,executionsBeforeNotices);
     pass('Review-only transcription leaves editable command, capture off, no execution or narration');
     await js('document.querySelector("[data-view=history]").click();');
-    await until(()=>js('document.querySelectorAll("#history-list button").length===5'),'five saved history entries');
+    await until(()=>js('document.querySelectorAll("#history-list button").length>=5'),'saved history entries');
     await js('document.querySelector("#history-list button").click();');
     await until(()=>js('document.getElementById("details-dialog").open'),'history details open');
     const detail=await js('JSON.parse(document.getElementById("trace").textContent)');
@@ -235,8 +281,19 @@ async function main(){
     await until(()=>js('document.getElementById("reminder-card").hidden'),'reminder dismissed');
     assert.ok(db.prepare('SELECT delivered_at FROM reminders WHERE id=?').get(reminder).delivered_at>0);
     pass('Reminder dismissal persists delivered_at in isolated SQLite');
+    const executionsBeforeClarification=desktopExecutions;
+    await js(`document.getElementById('command').value=${JSON.stringify(clarificationCommand)};document.getElementById('command').dispatchEvent(new Event('input'));document.getElementById('run').click();`);
+    await until(()=>js('document.getElementById("result-message").textContent==="Во сколько завтра?"'),'semantic clarification shown');
+    await settled();await pause(100);
+    assert.equal(await js('document.getElementById("result-message").textContent'),'Во сколько завтра?');
+    assert.equal(await js('document.getElementById("task-state").textContent'),'Нужно уточнение');
+    assert.equal(await js('document.getElementById("task-card").hidden'),false);assert.equal(desktopExecutions,executionsBeforeClarification);
+    assert.equal(speech.at(-1),'Во сколько завтра?');
+    pass('Clarification remains visible after narration and off status without desktop execution');
     await js('document.querySelector("[data-view=settings]").click();');
     await until(()=>js('document.getElementById("provider-gemini").textContent.includes("настроен")'),'mock provider status shown in settings');
+    await js('document.getElementById("voice-mode").value="live";document.getElementById("voice-mode").dispatchEvent(new Event("change"));');
+    await until(()=>js('window.lab.voiceStatus().then(status=>status.settings.transcriptionMode==="live")'),'live mode restored for settings preview');
     await capturePair('settings');
     const renderer=await js('({plays:window.__smoke.plays,pauses:window.__smoke.pauses,captures:window.__smoke.captures,speechEvents:window.__smoke.speechEvents,errors:window.__smoke.errors})');blocked.microphone=renderer.captures;
     assert.deepEqual(blocked,{desktop:0,launch:0,network:0,microphone:0});assert.deepEqual(renderer.errors,[]);

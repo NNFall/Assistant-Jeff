@@ -222,3 +222,50 @@ test('duplicate installed keyboard language records cannot produce duplicate act
   const candidates=buildWindowsCandidates(snapshot,'English').candidates.filter(c=>c.operation==='set_keyboard_language');
   assert.equal(candidates.length,2);assert.equal(new Set(candidates.map(c=>c.id)).size,candidates.length);
 });
+
+test('pure-window scope exposes the requested native operation for all observed windows without inspecting controls',()=>{
+  const snapshot=fixture({windows:6,controls:[control('play','Play'),control('tab','Chrome article',['select'])]});
+  snapshot.facts.selectedWindowId=null;
+  const batch=buildWindowsCandidates(snapshot,'Сверни Chrome',{scope:{operation:'minimize'}});
+  assert.equal(batch.candidates.length,6);
+  assert.ok(batch.candidates.every(c=>c.operation==='minimize'));
+  assert.deepEqual(batch.candidates.map(c=>c.targetId),snapshot.windows.map(w=>w.id));
+  const observation=windowsObservation(snapshot,{...batch,scope:{operation:'minimize'}});
+  assert.match(observation.summary,/no inspect access step is required/);
+  assert.match(observation.summary,/Observed controls: \[\]/);
+  assert.doesNotMatch(observation.summary,/Chrome article|Play/);
+});
+
+test('pure-window scope never invents a capability or a launch for close/minimize',()=>{
+  const snapshot=fixture({windows:3});snapshot.elements[1].capabilities=['inspect','activate'];
+  const app={id:'app_0123456789abcdef01234567',name:'Chrome',processName:'chrome'};
+  const batch=buildWindowsCandidates(snapshot,'Сверни Chrome',{scope:{operation:'minimize'},apps:[app]});
+  assert.deepEqual(batch.candidates.map(c=>c.targetId),['win_0','win_2']);
+  assert.ok(batch.candidates.every(c=>c.operation==='minimize'));
+  assert.equal(buildWindowsCandidates(snapshot,'Разверни Chrome',{scope:{operation:'maximize'}}).candidates.length,0);
+});
+
+test('activate scope keeps complete app coverage and every window on every candidate page',()=>{
+  const snapshot=fixture({windows:64});snapshot.facts.selectedWindowId=null;
+  const apps=Array.from({length:80},(_,i)=>({id:`app_${i.toString(16).padStart(24,'0')}`,name:`Application ${i}`,processName:`application-${i}`}));
+  apps.push({id:'app_ffffffffffffffffffffffff',name:'Editor',processName:'editor'});
+  const initial=buildWindowsCandidates(snapshot,'Открой приложение с разговорным псевдонимом',{scope:{operation:'activate'},apps});
+  assert.equal(initial.total,144);assert.ok(initial.pages>1);
+  const seen=new Set();
+  for(let page=0;page<initial.pages;page++){
+    const batch=buildWindowsCandidates(snapshot,'Открой приложение с разговорным псевдонимом',{scope:{operation:'activate'},apps,page});
+    assert.ok(batch.candidates.length<=96);
+    assert.deepEqual(batch.candidates.filter(c=>c.operation==='activate').map(c=>c.targetId),snapshot.windows.map(w=>w.id));
+    for(const candidate of batch.candidates)seen.add(candidate.targetId);
+    assert.equal(batch.candidates.some(c=>c.operation==='inspect'),false);
+  }
+  assert.equal(seen.size,144);assert.equal(seen.has(apps.at(-1).id),false);
+});
+
+test('invalid window scopes cannot broaden action authorization',()=>{
+  for(const scope of [null,[],{},'minimize',{operation:'invoke'},{operation:'shell'},{operation:'minimize',targetId:'invented'}]){
+    assert.throws(()=>buildWindowsCandidates(fixture(),'Сверни Chrome',{scope}),{code:'WINDOWS_INVALID_SCOPE'});
+  }
+  const initial=fixture({windows:2});initial.facts.selectedWindowId=null;
+  assert.ok(buildWindowsCandidates(initial,'Сверни Chrome, затем нажми кнопку').candidates.every(c=>c.operation==='inspect'));
+});

@@ -5,7 +5,7 @@ import {describeResult,describeError} from '../../desktop/automation/feedback.mj
 const $=id=>document.getElementById(id);
 const api=window.lab;
 const examples={taskmgr:'Открой диспетчер задач.',reminder:'Напомни через 10 минут проверить чай.',note:'Заметка: купить хлеб.',question:'Объясни, что такое оперативная память.'};
-let voice,voiceState={state:'off',enabled:false,busy:false,ready:false,settings:{activationBeep:true,denisReply:true,voiceAutoExecute:true},providers:{}};
+let voice,voiceState={state:'off',enabled:false,busy:false,ready:false,silenceMs:2000,settings:{activationBeep:true,denisReply:true,voiceAutoExecute:true,transcriptionMode:'live'},providers:{}};
 let pending=false,stopping=false,activeSource=null,currentRunId=null,lastFinishedRunId=null,lastReport=null,detailReport=null;
 let serial=0,startedAt=0,ticker=null,progressEvents=[],activities=[],view='assistant',historyLoading=false,reminderQueue=[];
 const states={off:'Микрофон выключен',stopped:'Микрофон выключен',idle:'Микрофон выключен',loading:'Готовлю микрофон',waiting:'Ожидаю Hey Jarvis',recording:'Слушаю команду',transcribing:'Распознаю речь',ready:'Команда распознана',processing:'Выполняю задачу',speaking:'Отвечает Денис',error:'Голос недоступен'};
@@ -24,6 +24,7 @@ function note(notice){
   if(notice.code==='NO_SPEECH'||notice.code==='EMPTY_TRANSCRIPT')text('voice-transcript','Распознанного текста нет.');
 }
 function clearNotice(){hidden('voice-notice',true);hidden('voice-metrics',true);}
+function clearTranscript(){text('voice-transcript','');hidden('voice-transcript',true);delete $('voice-transcript').dataset.final;}
 function taskClock(){if(startedAt&&pending)text('task-time',duration(performance.now()-startedAt));}
 function sync(){
   const active=busy();
@@ -37,7 +38,7 @@ function sync(){
   text('voice-wake-label',voiceState.enabled?'Выключить Jarvis':'Включить Jarvis');
   text('counter',`${$('command').value.length} / 1024`);
   for(const button of document.querySelectorAll('[data-example]'))button.disabled=active;
-  for(const id of ['voice-beep','voice-reply','voice-auto'])$(id).disabled=!voiceState.ready||active;
+  for(const id of ['voice-beep','voice-reply','voice-auto','voice-mode'])$(id).disabled=!voiceState.ready||active;
   text('voice-manual-label','Сказать команду');
   const voiceLabel=voiceState.source==='typed'&&!voiceState.enabled&&voiceState.state==='processing'?'Микрофон выключен':states[voiceState.state]||'Голосовой ввод';
   const headline=stopping?'Останавливаю':voiceState.state==='speaking'?voiceLabel:pending?$('activity').textContent||'Выполняю задачу':voiceState.enabled||voiceState.busy?voiceLabel:'Готов к задаче';
@@ -46,7 +47,7 @@ function sync(){
   text('footer-status',voiceState.enabled?'Микрофон включён':voiceState.state==='speaking'?'Звучит ответ · микрофон выключен':'Микрофон выключен');
   $('voice-wave').dataset.state=voiceState.state;hidden('voice-wave',!['recording','transcribing','speaking'].includes(voiceState.state));
   text('hero-title',voiceState.state==='recording'?'Я слушаю':voiceState.state==='transcribing'?'Распознаю вашу команду':lastReport&&pending?'Результат готов':pending?'Занимаюсь вашей задачей':'Что нужно сделать?');
-  text('hero-subtitle',voiceState.state==='recording'?'Говорите. После паузы в 2,5 секунды запись завершится.':voiceState.state==='transcribing'?'Запись закончена. Получаю текст из Gemini.':lastReport&&pending?'Ответ уже на экране. Озвучку можно остановить.':pending?'Показываю ход выполнения. Вы можете остановить меня.':'Скажите или напишите задачу — я покажу каждый шаг.');
+  text('hero-subtitle',voiceState.state==='recording'?'Говорите. После паузы в 2 секунды запись завершится.':voiceState.state==='transcribing'?'Запись закончена. Уточняю распознанный текст.':lastReport&&pending?'Ответ уже на экране. Озвучку можно остановить.':pending?'Показываю ход выполнения. Вы можете остановить меня.':'Скажите или напишите задачу — я покажу каждый шаг.');
 }
 function navigate(next){
   if(!['assistant','history','settings'].includes(next))return;
@@ -83,7 +84,7 @@ function finishReport(report){
   lastReport=report;detailReport=report;lastFinishedRunId=report.runId??null;
   const feedback=describeResult(report);
   hidden('task-card',false);hidden('welcome',true);$('task-card').dataset.tone=feedback.tone;$('task-card').setAttribute('aria-busy','false');
-  text('task-command',report.command||$('task-command').textContent||'Задача');text('task-state',feedback.tone==='success'?'Готово':feedback.tone==='neutral'?'Завершено':feedback.tone==='warning'?'Нужна проверка':'Не получилось');
+  text('task-command',report.command||$('task-command').textContent||'Задача');text('task-state',report.needsClarification===true?'Нужно уточнение':feedback.tone==='success'?'Готово':feedback.tone==='neutral'?'Завершено':feedback.tone==='warning'?'Нужна проверка':'Не получилось');
   text('result-title',feedback.title);text('result-message',feedback.message);text('activity','');text('task-time',duration(report.elapsedMs));
   hidden('activity-list',true);
   hidden('result-actions',false);$('edit-command').disabled=false;hidden('edit-command',report.mode==='GEMINI_CHAT'&&report.ok===true);
@@ -109,17 +110,24 @@ function acceptProgress(event){
   progressEvents.push(event);text('trace',pretty({status:'running',runId:currentRunId,events:progressEvents}));activity(event);
 }
 function renderVoiceState(state){
+  if(state.state==='recording'&&voiceState.state!=='recording'||['off','stopped','idle','waiting','error'].includes(state.state)&&$('voice-transcript').dataset.final==='false')clearTranscript();
   voiceState=state;
   for(const [id,key] of [['voice-beep','activationBeep'],['voice-reply','denisReply'],['voice-auto','voiceAutoExecute']])$(id).checked=state.settings[key]===true;
-  text('voice-status',state.message||(['off','stopped','idle'].includes(state.state)?'Нажмите «Сказать команду» для одной записи.':state.state==='waiting'?'Произнесите «Hey Jarvis», затем задачу.':state.state==='speaking'?'Результат уже доступен ниже.':states[state.state]||'Голосовой ввод'));text('voice-silence',duration(state.silenceMs));
+  $('voice-mode').value=state.settings.transcriptionMode??'live';
+  const streamMessage=state.state==='recording'?(state.streamPhase==='connecting'?'Подключаю распознавание. Уже можно говорить.':state.streamPhase==='live'?'Текст появляется по мере речи.':''):state.state==='transcribing'&&state.streamPhase==='finalizing'?'Завершаю распознавание.':'';
+  text('voice-status',streamMessage||state.message||(['off','stopped','idle'].includes(state.state)?'Нажмите «Сказать команду» для одной записи.':state.state==='waiting'?'Произнесите «Hey Jarvis», затем задачу.':state.state==='speaking'?'Результат уже доступен ниже.':states[state.state]||'Голосовой ввод'));text('voice-silence',duration(state.silenceMs));
   if(state.source==='voice'&&state.state==='processing'&&!pending&&activeSource!=='typed')startTask($('command').value,'voice');
   sync();
 }
 async function voiceEvent(event){
   if(event.type==='wake'){
-    clearNotice();lastReport=null;activeSource='voice';text('voice-transcript','');hidden('voice-transcript',true);hidden('task-card',true);hidden('welcome',true);
+    clearNotice();clearTranscript();lastReport=null;activeSource='voice';hidden('task-card',true);hidden('welcome',true);
+  }else if(event.type==='transcript'&&event.final===false){
+    if(!['recording','transcribing'].includes(voiceState.state)||typeof event.text!=='string')return;
+    $('voice-transcript').dataset.final='false';text('voice-transcript',event.text);hidden('voice-transcript',!event.text.trim());
   }else if(event.type==='transcript'&&event.final===true){
-    $('command').value=event.text;hidden('voice-transcript',false);text('voice-transcript',event.autoExecute===false?'Команда распознана. Проверьте текст и нажмите «Выполнить».':'Команда распознана.');sync();
+    if(typeof event.text!=='string')return;
+    $('voice-transcript').dataset.final='true';$('command').value=event.text;hidden('voice-transcript',false);text('voice-transcript',event.autoExecute===false?'Команда распознана. Проверьте текст и нажмите «Выполнить».':'Команда распознана.');sync();
   }else if(event.type==='voice_notice'){
     note(event);hidden('welcome',true);
     if(pending&&activeSource==='voice'&&!lastReport){finishFailure({code:event.code??'VOICE_PROCESSING_FAILED'});pending=false;stopping=false;sync();}
@@ -197,10 +205,11 @@ for(const button of document.querySelectorAll('[data-view]'))button.addEventList
 for(const button of document.querySelectorAll('[data-example]'))button.addEventListener('click',()=>{$('command').value=examples[button.dataset.example]??'';sync();$('command').focus();});
 $('command').addEventListener('input',()=>{hidden('voice-transcript',true);sync();});$('command').addEventListener('keydown',event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();void run();}});
 $('run').addEventListener('click',()=>void run());$('stop').addEventListener('click',()=>void stop());
-$('voice-manual').addEventListener('click',async()=>{if(busy())return;clearNotice();lastReport=null;activeSource='voice';if(voiceState.enabled)await voice.activate();else await voice.start('manual');});
+$('voice-manual').addEventListener('click',async()=>{if(busy())return;clearNotice();clearTranscript();lastReport=null;activeSource='voice';if(voiceState.enabled)await voice.activate();else await voice.start('manual');});
 $('voice-wake').addEventListener('click',async()=>{if(!voice)return;if(voiceState.enabled||voiceState.busy)await stop();else{clearNotice();await voice.start('wake');}});
 $('voice-finish').addEventListener('click',()=>void voice?.finish());
 for(const [id,key] of [['voice-beep','activationBeep'],['voice-reply','denisReply'],['voice-auto','voiceAutoExecute']])$(id).addEventListener('change',()=>void voice?.setSettings({[key]:$(id).checked}));
+$('voice-mode').addEventListener('change',()=>void voice?.setSettings({transcriptionMode:$('voice-mode').value}));
 $('edit-command').addEventListener('click',()=>{if(busy())return;if(lastReport?.command)$('command').value=lastReport.command;sync();$('command').focus();$('command').scrollIntoView({block:'center',behavior:'smooth'});});
 $('show-details').addEventListener('click',()=>openDetails());$('close-details').addEventListener('click',()=>$('details-dialog').close());
 $('history-refresh').addEventListener('click',()=>void loadHistory());$('reminder-dismiss').addEventListener('click',()=>void dismissReminder());

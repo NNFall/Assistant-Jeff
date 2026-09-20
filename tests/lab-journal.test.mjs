@@ -4,6 +4,7 @@ import {mkdtemp,readFile,appendFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {RunJournal,readRun,listRuns} from '../scripts/desktop-lab/journal.mjs';
+import {describeResult} from '../desktop/automation/feedback.mjs';
 
 async function workspace(t) {
   const directory=await mkdtemp(path.join(tmpdir(),'jeff-journal-test-'));
@@ -11,6 +12,44 @@ async function workspace(t) {
   return directory;
 }
 const readEvents=async run=>(await readFile(run.eventPath,'utf8')).trim().split('\n').map(JSON.parse);
+
+test('semantic parent and desktop child both remain running while unrelated abandoned runs are interrupted',async t=>{
+  const directory=await workspace(t);
+  const parent=await RunJournal.create('parent',{directory});
+  const child=await RunJournal.create('child',{directory});
+  const abandoned=await RunJournal.create('abandoned',{directory});
+  const activeRunIds=[parent.runId,child.runId];
+  assert.equal((await readRun(child.runId,{directory,activeRunIds})).status,'running');
+  const {runs}=await listRuns({directory,activeRunIds});
+  assert.equal(runs.find(r=>r.runId===parent.runId).status,'running');
+  assert.equal(runs.find(r=>r.runId===child.runId).status,'running');
+  assert.equal(runs.find(r=>r.runId===abandoned.runId).status,'interrupted');
+});
+
+test('recovered parent warns about its unresolved delegation even when the child finished its effect',async t=>{
+  const directory=await workspace(t);
+  const parent=await RunJournal.create('Закрой блокнот',{directory});
+  await parent.record('desktop_delegate_request',{scope:{operation:'close'}});
+  const child=await RunJournal.create('Закрой блокнот',{directory});
+  await child.record('execute_request',{operation:'close',targetId:'test-window'});
+  await child.record('execute_result',{receipt:{operation:'close',targetId:'test-window',verified:true,evidence:'window_closed'}});
+  await child.finish({ok:true,reason:'goal_verified',completed:[{operation:'close',outcome:'verified'}]});
+  const recovered=await readRun(parent.runId,{directory});
+  assert.equal(recovered.reason,'interrupted');
+  const feedback=describeResult(recovered);
+  assert.equal(feedback.tone,'warning');assert.equal(feedback.retryable,false);
+  assert.match(feedback.message,/могло выполниться.*Перед повтором проверьте/u);
+  assert.equal(describeResult(await readRun(child.runId,{directory})).tone,'success');
+  const {runs}=await listRuns({directory});
+  assert.equal(runs.find(run=>run.runId===parent.runId).feedback.tone,'warning');
+  assert.equal(runs.find(run=>run.runId===child.runId).feedback.tone,'success');
+  // The summary is written before the parent JSON embeds the native receipts.
+  await parent.record('desktop_delegate_result',{childRunId:child.runId,ok:true,reason:'goal_verified',executionUncertain:false});
+  const afterSummary=describeResult(await readRun(parent.runId,{directory}));
+  assert.equal(afterSummary.tone,'warning');assert.equal(afterSummary.retryable,false);
+  await parent.finish({ok:true,reason:'goal_verified',desktopEvents:child.events,completed:[{operation:'close',outcome:'verified'}]});
+  assert.equal(describeResult(await readRun(parent.runId,{directory})).tone,'success');
+});
 
 test('events reach JSONL before finish, including concurrent enqueue in sequence order',async t=>{
   const directory=await workspace(t);

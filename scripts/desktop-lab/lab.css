@@ -22,7 +22,7 @@ button { cursor: pointer; }
 button, a, input, textarea { -webkit-tap-highlight-color: transparent; }
 button:disabled { cursor: default; opacity: .5; }
 button, input { transition: background-color 140ms, border-color 140ms, box-shadow 140ms; }
-button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
   outline: 3px solid #8ba8ff;
   outline-offset: 3px;
 }
@@ -196,6 +196,8 @@ h1 { font-size: 29px; line-height: 1.25; font-weight: 650; letter-spacing: -.6px
 .setting-row input:checked { background: #486fe0; }
 .setting-row input:checked::before { transform: translateX(14px); }
 .setting-row input:disabled { opacity: .5; cursor: default; }
+.setting-row select { flex: 0 1 200px; min-width: 145px; max-width: 45%; padding: 9px 10px; color: #45536b; background: #fafbfd; border: 1px solid #dce4f0; border-radius: 7px; font: inherit; font-size: 12px; }
+.setting-row select:disabled { opacity: .5; }
 .setting-note { font-size: 12px; line-height: 1.65; color: #616f84; padding-top: 13px; }
 .provider-list { margin: 3px 0 0; }
 .provider-list > div { display: flex; justify-content: space-between; align-items: center; gap: 28px; padding: 14px 0; border-bottom: 1px solid #eef1f6; }

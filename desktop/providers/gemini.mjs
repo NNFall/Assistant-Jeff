@@ -3,6 +3,7 @@ import net from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {readProtected} from '../secrets.mjs';
+import {GeminiLiveStream} from './gemini-live.mjs';
 
 function waitForConnection(promise,signal){
   return new Promise((resolve,reject)=>{
@@ -90,6 +91,18 @@ export class GeminiGateway {
     const started=performance.now();
     const result=await this.request('/transcribe',{audio:mp3.toString('base64'),mimeType:'audio/mp3'},{signal,timeoutMs:50000});
     return {text:result.text,model:result.model,latencyMs:Math.round(performance.now()-started)};
+  }
+  createTranscriptionStream({signal,onTranscript,onMetrics,...options}={}){
+    const lifetime=this.lifetime.signal;
+    const combined=AbortSignal.any([lifetime,...(signal?[signal]:[])]);
+    const generation=this.generation;
+    return new GeminiLiveStream({...options,signal:combined,onTranscript,onMetrics,connect:async()=>{
+      combined.throwIfAborted();
+      await waitForConnection(this.connect(),combined);
+      combined.throwIfAborted();
+      if(generation!==this.generation||!this.url)throw new Error('Соединение отменено.');
+      return {url:this.url.replace(/^http:/,'ws:')+'/transcribe/live',token:this.token};
+    }});
   }
   close(){
     this.generation++;this.lifetime.abort();this.lifetime=new AbortController();

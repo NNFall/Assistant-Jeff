@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {access} from 'node:fs/promises';
 import path from 'node:path';
 import {BatchVoiceController} from './batch-controller.mjs';
+import {silenceDurationMs} from './utterance.mjs';
 import {describeError,describeResult} from '../automation/feedback.mjs';
 
 export const spokenResult=report=>describeResult(report).spoken;
@@ -12,9 +13,10 @@ export class VoiceSession {
   constructor({paths,encoder,gateway,denis,commands,getSettings,emit=()=>{},createWake,playbackTimeoutMs=120000,tailMs=350}){
     Object.assign(this,{paths,encoder,gateway,denis,commands,getSettings,emit,playbackTimeoutMs,tailMs});
     this.epoch=0;this.playback=null;
-    this.batch=new BatchVoiceController({createWake,getSettings:()=>({...getSettings(),voiceBeep:getSettings().activationBeep,duckAudio:false}),
+    this.batch=new BatchVoiceController({createWake,getSettings:()=>({...getSettings(),transcriptionMode:getSettings().transcriptionMode??'live',voiceBeep:getSettings().activationBeep,duckAudio:false}),
       encodeMp3:(pcm,options)=>encoder.encode(pcm,options),
       transcribe:async(mp3,options)=>{const result=await gateway.transcribe(mp3,options);if(!options.signal.aborted)this.voiceEvent({type:'transcription_metrics',model:result.model,latencyMs:result.latencyMs,bytes:mp3.length});return result;},
+      createTranscriptionStream:options=>gateway.createTranscriptionStream(options),
       onTranscript:(text,options)=>this.transcript(text,options),onNotice:(code,options)=>this.notice(code,options),emit:event=>this.event(event)});
   }
   get state(){return this.typedTask?this.typedState:this.batch.state;}
@@ -26,13 +28,21 @@ export class VoiceSession {
     this.voiceEvent(event);
     if(event.type==='status'&&event.state==='waiting'&&this.batch.config?.manual&&this.utteranceStarted){
       const generation=this.batch.generation;
-      setTimeout(()=>{if(generation===this.batch.generation)void this.stop();},0);
+      setTimeout(()=>{
+        if(generation!==this.batch.generation||this.batch.state!=='waiting'||!this.batch.config?.manual||this.typedTask||this.commands.running)return;
+        // The command and its narration are already complete. Release capture
+        // without cancelling the executor's pending reminder clarification.
+        // Explicit Stop still uses stop() below and cancels both lifecycles.
+        this.utteranceStarted=false;
+        void this.batch.stop();
+      },0);
     }
   }
   async status(){
+    const settings=this.getSettings();
     const [gemini,denis,encoder,wake]=await Promise.all([this.gateway.available(),this.denis.status(),this.encoder.available(),
       Promise.all(['melspectrogram.onnx','embedding_model.onnx','hey_jarvis_v0.1.onnx'].map(name=>access(path.join(this.paths.models,name)))).then(()=>true,()=>false)]);
-    return {state:this.state,settings:this.getSettings(),providers:{gemini,denis:denis.available,wake,encoder},silenceMs:2500};
+    return {state:this.state,settings,providers:{gemini,live:gemini&&typeof this.gateway.createTranscriptionStream==='function',denis:denis.available,wake,encoder},silenceMs:silenceDurationMs(settings.silenceMs??settings.voiceSilenceMs)};
   }
   async start({mode='wake'}={}){
     if(!['wake','manual'].includes(mode))throw Object.assign(new Error(),{code:'VOICE_MODE_INVALID'});
@@ -46,9 +56,11 @@ export class VoiceSession {
     if(epoch!==this.epoch)return cancelled();
     if(!available.settings.cloudEnabled)return unavailable('CLOUD_DISABLED');
     if(!available.providers.gemini)return unavailable('GEMINI_UNAVAILABLE');
-    if(!available.providers.encoder)return unavailable('ENCODER_MISSING');
+    const live=available.settings.transcriptionMode!=='batch';
+    if(live&&!available.providers.live)return unavailable('LIVE_TRANSCRIPTION_UNAVAILABLE');
+    if(!live&&!available.providers.encoder)return unavailable('ENCODER_MISSING');
     this.utteranceStarted=false;
-    await this.batch.start({...this.getSettings(),modelsDir:this.paths.models,manual:mode==='manual',silenceMs:2500});
+    await this.batch.start({...this.getSettings(),modelsDir:this.paths.models,manual:mode==='manual',silenceMs:available.silenceMs});
     if(epoch!==this.epoch)return cancelled();
     if(this.state==='error')return unavailable('WAKE_LOAD_FAILED');
     if(mode==='manual'&&!this.batch.activate())return unavailable('VOICE_BUSY');

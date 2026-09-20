@@ -111,3 +111,33 @@ test('voice terminal report is delivered after Stop, but an old voice report is 
   await x.client.handleEvent({type:'result',source:'voice',operationId:'voice-2',report:{runId:'current',reason:'goal_verified'}});
   assert.equal(x.events.length,2);assert.equal(x.events[1].report.runId,'current');
 });
+
+test('live mode is the default and saved transcription mode round-trips through status',async t=>{
+  const x=fixture(t);await x.client.initialize();
+  assert.equal(x.states.at(-1).settings.transcriptionMode,'live');assert.equal(x.states.at(-1).silenceMs,2000);
+  await x.client.setSettings({transcriptionMode:'batch'});assert.equal(x.states.at(-1).settings.transcriptionMode,'batch');
+  await x.client.setSettings({transcriptionMode:'live'});assert.equal(x.states.at(-1).settings.transcriptionMode,'live');
+  x.client.applyStatus({settings:{transcriptionMode:true}});assert.equal(x.client.settings.transcriptionMode,'live');
+  x.client.applyStatus({settings:{transcriptionMode:'unsupported'}});assert.equal(x.client.settings.transcriptionMode,'live');
+});
+
+test('partial transcripts remain display events and never invoke command execution',async t=>{
+  const x=fixture(t);let executions=0;x.api.run=()=>{executions++;};
+  await x.client.initialize();await x.client.start('manual');
+  for(const text of ['Напомни','Напомни завтра'])await x.client.handleEvent({type:'transcript',source:'voice',text,final:false});
+  assert.equal(executions,0);assert.equal(x.client.state,'recording');
+  assert.deepEqual(x.events.map(event=>event.final),[false,false]);
+  await x.client.stop();
+  await x.client.handleEvent({type:'transcript',source:'voice',text:'Запоздалая фраза',final:false});
+  assert.equal(x.events.length,2);assert.equal(executions,0);
+});
+
+test('stream phases are friendly state data and reset after capture ends',async t=>{
+  const x=fixture(t);await x.client.initialize();await x.client.start('manual');
+  await x.client.handleEvent({type:'stream_status',source:'voice',state:'connecting',message:'Raw provider details'});
+  assert.equal(x.states.at(-1).streamPhase,'connecting');assert.doesNotMatch(x.states.at(-1).message,/Raw/u);
+  await x.client.handleEvent({type:'stream_status',source:'voice',state:'live'});assert.equal(x.states.at(-1).streamPhase,'live');
+  await x.client.handleEvent({type:'stream_status',source:'voice',state:'private-provider-state'});assert.equal(x.states.at(-1).streamPhase,'live');
+  await x.client.handleEvent({type:'status',source:'voice',state:'processing',operationId:'voice-1'});assert.equal(x.states.at(-1).streamPhase,null);
+  await x.client.handleEvent({type:'stream_status',source:'voice',state:'live',operationId:'voice-1'});assert.equal(x.states.at(-1).streamPhase,null);
+});

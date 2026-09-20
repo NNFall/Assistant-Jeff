@@ -376,6 +376,49 @@ test('uninspected windows require discovery before offering their window effects
   assert.deepEqual(report.completed.map(c=>c.evidence),['window_inspected','window_minimized']);
 });
 
+test('confident pure-window scope bypasses inspect but still requires native receipt and fresh goal verification',async t=>{
+  const before=snapshot(1,{selected:false}),after=snapshot(2,{selected:false,minimized:true});let choices=0;
+  const ctx=await setup(t,{snapshots:[before,before,after,after],choose:async input=>{
+    choices++;
+    assert.equal(input.phase,'controls');
+    assert.equal(input.candidates.some(c=>c.operation==='inspect'),false);
+    assert.match(input.observation.summary,/Pure window operation: minimize/);
+    if(choices===1)return action(input);
+    assert.equal(input.completed[0].evidence,'window_minimized');
+    return done();
+  },execute:async args=>receipt(args,after)});
+  const report=await ctx.desktop.run({command:'Сверни Editor',scope:{operation:'minimize'}});
+  assert.equal(report.ok,true);assert.equal(report.reason,'goal_verified');assert.equal(choices,2);
+  assert.deepEqual(ctx.calls.filter(c=>c.method==='execute').map(c=>c.args.operation),['minimize']);
+  assert.deepEqual(report.scope,{operation:'minimize'});
+  assert.equal(report.completed[0].evidence,'window_minimized');
+});
+
+test('scoped activate failure does not become success or get retried without evidence',async t=>{
+  const before=snapshot(1,{selected:false});before.elements[0].capabilities.push('activate');before.windows[0].active=false;
+  let choices=0;
+  const ctx=await setup(t,{snapshots:[before],choose:async input=>{choices++;return action(input,'activate');},execute:async args=>receipt(args,before,{verified:false,evidence:'foreground_not_granted'})});
+  const report=await ctx.desktop.run({command:'Открой Editor',scope:{operation:'activate'}});
+  assert.equal(report.ok,false);assert.equal(report.reason,'not_verified');assert.equal(choices,1);
+  assert.equal(ctx.calls.filter(c=>c.method==='execute').length,1);assert.equal(report.completed.length,0);
+});
+
+test('scoped low-confidence choices preserve the 0.8 gate and do not blindly repeat unchanged input',async t=>{
+  let choices=0;
+  const ctx=await setup(t,{snapshots:[snapshot(1,{selected:false})],choose:async input=>{choices++;return {...action(input),confidence:0.79};}});
+  const report=await ctx.desktop.run({command:'Сверни Editor',scope:{operation:'minimize'}});
+  assert.equal(report.reason,'low_confidence');assert.equal(report.ok,false);assert.equal(choices,1);
+  assert.equal(ctx.calls.some(c=>c.method==='execute'),false);
+});
+
+test('invalid scoped operations are rejected before any desktop observation or journal',async t=>{
+  const ctx=await setup(t);
+  for(const scope of [null,{},'activate',{operation:'invoke'},{operation:'minimize',targetId:'invented'}]){
+    await assert.rejects(ctx.desktop.run({command:'Сверни Editor',scope}),{code:'WINDOWS_INVALID_SCOPE'});
+  }
+  assert.equal(ctx.calls.length,0);assert.equal(ctx.desktop.running,false);
+});
+
 const installedMusic={id:'app_0123456789abcdef01234567',name:'Music Player',processName:'music-player',exe:'C:\\Synthetic Programs\\Music Player\\music-player.exe'};
 function withNewWindow(original,{id='win_music',processId=4242,processName='music-player',title='Music Player'}={}){
   return {...structuredClone(original),version:version(2),windows:[...original.windows,{id,title,processName,processId,minimized:false,maximized:false,active:true}],elements:[...original.elements,{id,windowId:id,label:`${processName}: ${title}`,name:title,role:'Window',capabilities:['inspect','activate','minimize']} ]};

@@ -11,7 +11,7 @@ export function runtimePaths({root,packaged=false,resourcesPath,appData,dataOver
     denis:packaged?path.join(resourcesPath,'voices','ru_RU-denis-medium.onnx'):path.join(root,'data','tts','piper','ru_RU-denis-medium.onnx'),
     ffmpeg:packaged?path.join(resourcesPath,'voice-runtime','ffmpeg','ffmpeg.exe'):path.join(root,'work','voice-runtime','ffmpeg','ffmpeg.exe')};
 }
-export const VOICE_DEFAULTS=Object.freeze({activationBeep:true,denisReply:true,voiceAutoExecute:true,wakeWord:'hey_jarvis',wakeThreshold:0.5,microphoneId:'',cloudEnabled:true});
+export const VOICE_DEFAULTS=Object.freeze({activationBeep:true,denisReply:true,voiceAutoExecute:true,wakeWord:'hey_jarvis',wakeThreshold:0.5,microphoneId:'',cloudEnabled:true,transcriptionMode:'live'});
 export function initializeRuntime(paths,root,{isolated=false}={}){
   fs.mkdirSync(paths.data,{recursive:true});
   if(!isolated){
@@ -27,6 +27,7 @@ export function validateVoiceSettings(patch={},current=VOICE_DEFAULTS){
   if(!patch||typeof patch!=='object'||Array.isArray(patch))throw new Error('VOICE_SETTINGS_INVALID');
   const next={...current};
   for(const key of ['activationBeep','denisReply','voiceAutoExecute','cloudEnabled'])if(key in patch){if(typeof patch[key]!=='boolean')throw new Error('VOICE_SETTINGS_INVALID');next[key]=patch[key];}
+  if('transcriptionMode' in patch){if(!['live','batch'].includes(patch.transcriptionMode))throw new Error('VOICE_SETTINGS_INVALID');next.transcriptionMode=patch.transcriptionMode;}
   if('microphoneId' in patch){if(typeof patch.microphoneId!=='string'||patch.microphoneId.length>512)throw new Error('VOICE_SETTINGS_INVALID');next.microphoneId=patch.microphoneId;}
   return next;
 }

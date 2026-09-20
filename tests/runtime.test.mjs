@@ -95,6 +95,9 @@ test('voice settings validate typed patches and preserve unrelated current value
   assert.equal(VOICE_DEFAULTS.activationBeep,true);assert.equal(Object.hasOwn(next,'unknown'),false);
   for(const patch of [null,[],{activationBeep:1},{denisReply:'true'},{voiceAutoExecute:null},{cloudEnabled:'false'},{microphoneId:123},{microphoneId:'x'.repeat(513)}])assert.throws(()=>validateVoiceSettings(patch),/VOICE_SETTINGS_INVALID/);
   assert.equal(validateVoiceSettings({microphoneId:'x'.repeat(512)}).microphoneId.length,512);
+  assert.equal(VOICE_DEFAULTS.transcriptionMode,'live');
+  assert.equal(validateVoiceSettings({transcriptionMode:'batch'}).transcriptionMode,'batch');
+  assert.throws(()=>validateVoiceSettings({transcriptionMode:'unknown'}),/VOICE_SETTINGS_INVALID/);
 });
 
 test('saving settings round-trips validated values and an invalid update preserves the existing file',t=>{

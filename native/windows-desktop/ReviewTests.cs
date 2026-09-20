@@ -36,7 +36,7 @@ internal static class ReviewTests
             var assembly = Assembly.LoadFrom(args[0]); var helperType = assembly.GetType("WindowsDesktopHelper");
             using (var timeoutHelper = (IDisposable)Activator.CreateInstance(helperType, BindingFlags.NonPublic | BindingFlags.Instance, null, new object[]{0,0}, null))
             {
-                var automation = helperType.GetField("automation",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(timeoutHelper);
+                var automation = helperType.GetProperty("automation",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(timeoutHelper,null);
                 var timeoutProperty = automation.GetType().GetProperty("TransactionTimeout");
                 var withTimeout = helperType.GetMethod("WithMutationTimeout",BindingFlags.NonPublic|BindingFlags.Instance);
                 int calls=0; bool bounded=false,failed=false;

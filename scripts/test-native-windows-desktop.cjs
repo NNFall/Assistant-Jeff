@@ -33,6 +33,7 @@ function command(executable, args, capture = false) {
 let fixture;
 let helper;
 const checks = [];
+const trace = []; // Only this process-owned, PID-restricted fixture is observed.
 const pending = new Map();
 let requestId = 0;
 async function run() {
@@ -52,11 +53,13 @@ async function run() {
   helper = spawn(helperExe, ['--fixture-pid', String(fixture.pid)], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   readline.createInterface({ input: helper.stdout }).on('line', line => {
     const result = JSON.parse(line);
+    trace.push({ direction: 'response', ...result });
     const callback = pending.get(result.id);
     if (callback) { pending.delete(result.id); clearTimeout(callback.timer); callback.resolve(result); }
   });
   const rpc = (method, args = {}) => new Promise((resolve, reject) => {
     const id = ++requestId;
+    trace.push({ direction: 'request', id, method, args });
     const timer = setTimeout(() => { pending.delete(id); reject(new Error('RPC_TIMEOUT')); }, 15_000);
     pending.set(id, { resolve, reject, timer });
     helper.stdin.write(`${JSON.stringify({ id, method, args })}\n`);
@@ -123,6 +126,10 @@ async function run() {
   assert.equal(stale.ok, false);
   assert.equal(stale.error.code, 'STALE_SNAPSHOT');
   checks.push('stale effect rejected');
+  const staleMissing = await rpc('execute', { expectedVersion: 'invalid', targetId: 'el_missing_fixture_target', operation: 'invoke' });
+  assert.equal(staleMissing.ok, false);
+  assert.equal(staleMissing.error.code, 'STALE_SNAPSHOT');
+  checks.push('stale snapshot rejected before missing-target lookup');
 
   const beforeMinimize = snapshot.windows[0].stateVersion;
   receipt = await execute(windowId, 'minimize');
@@ -150,7 +157,10 @@ async function run() {
   fs.writeFileSync(path.join(work, 'native-test-result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
 }
-run().catch(error => { console.error(error.stack); process.exitCode = 1; }).finally(async () => {
+run().catch(error => {
+  fs.writeFileSync(path.join(work, 'native-test-failure.json'), JSON.stringify({ checks, error: error.message, trace }, null, 2));
+  console.error(error.stack); process.exitCode = 1;
+}).finally(async () => {
   for (const callback of pending.values()) clearTimeout(callback.timer);
   helper?.stdin.end();
   if (fixture?.exitCode === null) fixture.kill(); // Only our own disposable fixture.

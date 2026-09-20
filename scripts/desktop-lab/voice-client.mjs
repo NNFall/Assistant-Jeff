@@ -2,7 +2,7 @@ import { Microphone } from '../../desktop/renderer/audio.js';
 
 const BUSY_STATES = new Set(['loading', 'recording', 'transcribing', 'ready', 'processing', 'speaking']);
 const OFF_STATES = new Set(['off', 'idle', 'stopped', 'error']);
-const defaults = { activationBeep: true, denisReply: true, voiceAutoExecute: true };
+const defaults = { activationBeep: true, denisReply: true, voiceAutoExecute: true, transcriptionMode: 'live' };
 
 function checked(result) {
   if (result?.ok === false || result?.error) {
@@ -17,7 +17,7 @@ function checked(result) {
 export class VoiceClient {
   constructor(api, { onState = () => {}, onEvent = () => {}, onError = () => {}, MicrophoneClass = Microphone, createAudio = url => new Audio(url), createUrl = blob => URL.createObjectURL(blob), revokeUrl = url => URL.revokeObjectURL(url) } = {}) {
     Object.assign(this, { api, onState, onEvent, onError, createAudio, createUrl, revokeUrl });
-    this.settings = { ...defaults }; this.providers = {}; this.state = 'off'; this.silenceMs = 2500;
+    this.settings = { ...defaults }; this.providers = {}; this.state = 'off'; this.silenceMs = 2000; this.streamPhase = null;
     this.generation = 0; this.ready = false; this.starting = false; this.enabled = false; this.acceptEvents = false; this.playback = null;
     this.typedOperation = null; this.voiceOperation = null; this.cancelledTyped = new Set();
     this.microphone = new MicrophoneClass(chunk => {
@@ -30,10 +30,11 @@ export class VoiceClient {
   get busy() { return this.starting || BUSY_STATES.has(this.state); }
   notify(message) {
     if (typeof message === 'string') this.message = message;
-    this.onState({ state: this.starting ? 'loading' : this.state, enabled: this.enabled, busy: this.busy, ready: this.ready, settings: { ...this.settings }, providers: { ...this.providers }, silenceMs: this.silenceMs, message: this.message ?? '', review: this.review === true, source: this.eventSource ?? 'voice', operationId: this.typedOperation ?? this.voiceOperation });
+    this.onState({ state: this.starting ? 'loading' : this.state, enabled: this.enabled, busy: this.busy, ready: this.ready, settings: { ...this.settings }, providers: { ...this.providers }, silenceMs: this.silenceMs, streamPhase: this.streamPhase, message: this.message ?? '', review: this.review === true, source: this.eventSource ?? 'voice', operationId: this.typedOperation ?? this.voiceOperation });
   }
   applyStatus(result) {
-    for (const key of Object.keys(defaults)) if (typeof result?.settings?.[key] === 'boolean') this.settings[key] = result.settings[key];
+    for (const key of ['activationBeep', 'denisReply', 'voiceAutoExecute']) if (typeof result?.settings?.[key] === 'boolean') this.settings[key] = result.settings[key];
+    if (['live', 'batch'].includes(result?.settings?.transcriptionMode)) this.settings.transcriptionMode = result.settings.transcriptionMode;
     if (result?.providers) this.providers = { ...result.providers };
     if (Number.isFinite(result?.silenceMs)) this.silenceMs = result.silenceMs;
   }
@@ -52,7 +53,7 @@ export class VoiceClient {
     if (!this.ready || this.starting || this.busy) return;
     if (this.enabled) { if (mode === 'manual') await this.activate(); return; }
     const generation = ++this.generation;
-    this.eventSource = 'voice'; this.voiceOperation = null; this.review = false; this.message = '';
+    this.eventSource = 'voice'; this.voiceOperation = null; this.review = false; this.message = ''; this.streamPhase = null;
     this.starting = true; this.enabled = true; this.acceptEvents = true; this.state = 'loading'; this.notify();
     try {
       const result = checked(await this.api.voiceStart({ mode }));
@@ -83,7 +84,7 @@ export class VoiceClient {
   }
   async stop() {
     ++this.generation; this.enabled = false; this.acceptEvents = false; this.starting = false; this.state = 'off'; this.beepPending = false;
-    this.review = false; this.message = 'Микрофон выключен.';
+    this.review = false; this.message = 'Микрофон выключен.'; this.streamPhase = null;
     if (this.typedOperation) {
       this.cancelledTyped.add(this.typedOperation);
       if (this.cancelledTyped.size > 32) this.cancelledTyped.delete(this.cancelledTyped.values().next().value);
@@ -158,10 +159,18 @@ export class VoiceClient {
     if (event.type === 'reminder') { this.onEvent(event); return; }
     if (event.type === 'speech') { await this.play(event); return; }
     if (!this.accepts(event)) return;
+    if (event.type === 'stream_status') {
+      if (!['recording', 'transcribing', 'loading'].includes(this.state)) return;
+      if (['connecting', 'live', 'finalizing'].includes(event.state)) { this.streamPhase = event.state; this.notify(); }
+      return;
+    }
     if (event.type === 'status') {
       this.eventSource = event.source ?? 'voice';
       this.review = event.review === true;
-      if (typeof event.state === 'string') this.state = event.state;
+      if (typeof event.state === 'string') {
+        if (event.state === 'recording' && this.state !== 'recording' || !['recording', 'transcribing'].includes(event.state)) this.streamPhase = null;
+        this.state = event.state;
+      }
       this.applyStatus(event);
       if (event.source === 'typed') {
         if (OFF_STATES.has(this.state)) { this.typedOperation = null; this.cancelPlayback(); }

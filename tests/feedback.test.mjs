@@ -264,3 +264,80 @@ test('specific native unverified receipts explain uncertainty even when the flag
     }
   }
 });
+
+test('semantic clarification preserves its question without claiming completion', () => {
+  const actual=describeResult({ok:false,reason:'clarification_required',needsClarification:true,message:'Во сколько завтра?'});
+  assert.equal(actual.tone,'neutral');assert.equal(actual.title,'Нужно уточнение');
+  assert.equal(actual.message,'Во сколько завтра?');assert.equal(actual.spoken,'Во сколько завтра?');
+  for(const needsClarification of [false,undefined,'true'])assert.notEqual(describeResult({ok:false,reason:'clarification_required',needsClarification,message:'PRIVATE'}).message,'PRIVATE');
+});
+
+test('system completion requires an explicitly verified successful receipt', () => {
+  const report={ok:true,reason:'system_completed',message:'Громкость установлена на 30%.',result:{ok:true,verified:true}};
+  assert.equal(describeResult(report).message,report.message);assert.equal(describeResult(report).tone,'success');
+  for(const result of [{ok:true},{ok:false,verified:true},{ok:true,verified:'true'},null]){
+    const actual=describeResult({...report,result});assert.notEqual(actual.tone,'success');assert.notEqual(actual.message,report.message);
+  }
+  assert.notEqual(describeResult({...report,executionUncertain:true}).tone,'success');
+});
+
+test('routine spoken failures are short while detailed text stays useful', () => {
+  for(const reason of ['unsupported','low_confidence','WINDOWS_CHOICE_NETWORK','APP_LAUNCH_FAILED','time_limit','step_limit','no_request']){
+    const actual=describeResult({ok:false,reason});assert.ok(actual.spoken.length<=100,reason);
+    assert.equal(actual.spoken.split(/[.!?]/u).filter(part=>part.trim()).length,1,reason);assert.ok(actual.message.length>0);
+  }
+  const uncertain=describeResult({ok:false,reason:'unsupported',executionUncertain:true});
+  assert.match(uncertain.spoken,/не подтверждён.*проверьте.*повтором/u);
+  assert.match(uncertain.message,/Действие могло выполниться/u);
+  assert.doesNotMatch(describeResult({ok:false,reason:'no_request'}).message,/начните|Расскажи|Объясни/u);
+});
+
+test('semantic parent keeps native desktop receipt details and uncertainty', () => {
+  const parent={ok:false,reason:'not_verified',events:[{phase:'intent_decision',route:'desktop'}],desktopEvents:[request('replace_text'),receipt('replace_text','text_set_unverified')],completed:[]};
+  assert.equal(describeResult(parent).title,'Текст передан приложению');
+  assert.match(describeResult({...parent,reason:'aborted',desktopEvents:[request('minimize')]}).message,/могло выполниться/u);
+  assert.equal(describeResult({...parent,reason:'aborted',desktopEvents:[request('inspect')]}).tone,'neutral');
+});
+
+test('unresolved semantic dispatch warns on interruption while matched results keep their evidence', () => {
+  for (const prefix of ['desktop_delegate', 'system_execute']) {
+    const dispatch = {phase:`${prefix}_request`};
+    for (const property of ['events', 'trace']) {
+      const actual = describeResult({ok:false,reason:'interrupted',[property]:[dispatch]});
+      assert.equal(actual.tone,'warning');assert.equal(actual.retryable,false);
+      assert.match(actual.message,/могло выполниться/u);
+    }
+    const events = [dispatch,{phase:`${prefix}_result`,ok:false,reason:'no_request'}];
+    assert.equal(describeResult({ok:false,reason:'no_request',events}).retryable,true);
+    assert.equal(describeResult({ok:false,reason:'aborted',events,executionUncertain:true}).retryable,false);
+  }
+  const events=[{phase:'desktop_delegate_request'},{phase:'desktop_delegate_result',ok:true,reason:'goal_verified'}];
+  for (const interruption of [{reason:'interrupted'}, {reason:'interrupted',status:'interrupted'}]) {
+    const recovered=describeResult({ok:false,...interruption,events});
+    assert.equal(recovered.tone,'warning');assert.equal(recovered.retryable,false);
+  }
+  assert.equal(describeResult({ok:true,reason:'goal_verified',events,completed:[{operation:'close',outcome:'verified'}]}).tone,'success');
+  assert.equal(describeResult({ok:false,reason:'APP_LAUNCH_FAILED',events,executionUncertain:false}).retryable,true);
+  assert.equal(describeResult({ok:false,reason:'not_verified',events,desktopEvents:[request('replace_text'),receipt('replace_text','text_set_unverified')]}).title,'Текст передан приложению');
+});
+
+test('semantic provider and live speech errors use safe actionable copy', () => {
+  assert.equal(describeResult({ok:false,reason:'intent_failed',error:'ASSISTANT_INTENT_KEY',message:'PRIVATE'}).title,'Jev не подключён');
+  for(const error of ['ASSISTANT_INTENT_NETWORK','ASSISTANT_INTENT_HTTP','ASSISTANT_INTENT_TIMEOUT']){
+    const actual=describeResult({ok:false,reason:'intent_failed',error,message:'PRIVATE'});
+    assert.equal(actual.title,'Нет ответа от Jev');assert.doesNotMatch(JSON.stringify(actual),/PRIVATE/u);
+  }
+  for(const code of ['LIVE_TRANSCRIPTION_UNAVAILABLE','LIVE_AUDIO_REJECTED','LIVE_TRANSCRIPTION_FAILED']){
+    const actual=describeError(code);assert.match(actual.message,/После записи/u);assert.ok(actual.spoken.length<=100);
+  }
+});
+
+test('recovered system result retains verified or uncertain effects before the final report is saved', () => {
+  const report=result=>({ok:false,reason:'interrupted',events:[{phase:'system_execute_request',intent:{kind:'volume',percent:75}},{phase:'system_execute_result',result}]});
+  const verified=describeResult(report({ok:true,verified:true,effectAttempted:true}));
+  assert.equal(verified.tone,'warning');assert.equal(verified.retryable,false);assert.match(verified.message,/Часть действий выполнена/u);
+  const uncertain=describeResult(report({ok:false,verified:false,effectAttempted:true}));
+  assert.equal(uncertain.tone,'warning');assert.equal(uncertain.retryable,false);assert.match(uncertain.message,/могло выполниться/u);
+  const rejected=describeResult(report({ok:false,verified:false,effectAttempted:false}));
+  assert.equal(rejected.tone,'neutral');assert.equal(rejected.retryable,true);
+});
