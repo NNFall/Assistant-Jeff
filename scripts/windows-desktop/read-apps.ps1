@@ -6,6 +6,8 @@ $OutputEncoding = [Console]::OutputEncoding
 # Read installed application shortcuts only. Reject links requiring arguments:
 # their name may identify a PWA/game rather than the executable they point to.
 # Argument contents are never stored, returned, logged or passed to a process.
+# Explicit built-ins (Task Manager) are added by the JavaScript catalog, which
+# validates the exact SystemRoot executable; this shortcut scan stays restricted.
 $blocked = '(?i)(uninstall|unins\d*|updat(?:e|er|ing)|setup|installer|maintenance|repair|codex|antigravity|password|keepass|bitwarden|1password|lastpass|dashlane|nordpass|security|defender|antivirus|credential|settings|control panel|terminal|powershell|command prompt|\u0443\u0434\u0430\u043b\u0435\u043d\u0438|\u0434\u0435\u0438\u043d\u0441\u0442\u0430\u043b|\u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d|\u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0449\u0438\u043a|\u043f\u0430\u0440\u043e\u043b|\u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442|\u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b|\u043a\u043e\u043c\u0430\u043d\u0434\u043d\u0430\u044f \u0441\u0442\u0440\u043e\u043a\u0430)'
 $blockedExecutable = '^(?i:cmd|powershell|pwsh|conhost|wt|windowsterminal|bash|wsl|sh|python\d*|pythonw\d*|node|deno|bun|ruby|perl|cscript|wscript|mshta|rundll32|regsvr32|regedit|mmc|control|taskmgr|procexp\d*|processhacker|runas|java|javaw|electron|msiexec|schtasks|sc|net|netsh|bcdedit|diskpart|format|services|secpol|gpedit|mstsc|ssh|putty|openconsole)$'
 $roots = @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPath('CommonStartMenu')) | Select-Object -Unique

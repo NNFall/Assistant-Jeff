@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {buildWindowsCandidates,validateWindowsSnapshot,windowsObservation} from '../desktop/automation/windows-candidates.mjs';
+import {buildWindowsCandidates,validateWindowsSnapshot,windowsObservation,replacementLiteral} from '../desktop/automation/windows-candidates.mjs';
 
 function fixture({windows=1,controls=[]}={}){
   const surfaces=Array.from({length:windows},(_,i)=>({id:`win_${i}`,title:`Document ${i}`,processName:'editor',minimized:false,maximized:false,active:i===0}));
@@ -143,4 +143,82 @@ test('only the selected window exposes effects, while other windows expose inspe
   for(const target of ['win_1','win_2'])assert.deepEqual(selected.filter(c=>c.targetId===target).map(c=>c.operation),['inspect']);
   const none=buildWindowsCandidates({...snapshot,facts:{selectedWindowId:null}},'Сверни окно').candidates;
   assert.equal(none.length,3);assert.ok(none.every(c=>c.operation==='inspect'));
+});
+
+const focusedEdit=(patch={})=>({...control('focused_input','Focused editable field',['replace_text']),role:'Edit',hasKeyboardFocus:true,isPassword:false,readOnly:false,enabled:true,offscreen:false,supportsValuePattern:true,...patch});
+const inputCandidates=(snapshot,command='замени текст на «Точный текст»')=>buildWindowsCandidates(snapshot,command).candidates.filter(c=>c.operation==='replace_text');
+
+test('replacement literal is anchored to the entire explicit command and preserved exactly',()=>{
+  for(const [command,expected] of [
+    ['замени текст на «Hello, Джефф!»','Hello, Джефф!'],
+    [' ЗАМЕНИ ТЕКСТ НА "  Exact Text  ". ','  Exact Text  '],
+    ['замени текст на «»',''],
+    ['замени текст на «первая\nвторая»','первая\nвторая'],
+  ])assert.equal(replacementLiteral(command),expected);
+  for(const command of [
+    'не замени текст на «Текст»','объясни фразу: замени текст на «Текст»',
+    'замени текст на «Текст», затем отправь','замени текст на «один» и «два»',
+    'допиши «Текст»','замени текст на Текст','замени текст на «Текст"',
+    'замени текст на "первая\nвторая"',
+  ])assert.equal(replacementLiteral(command),null,command);
+});
+
+test('replacement candidates keep the source literal as fixed executor arguments without inferred text',()=>{
+  const snapshot=fixture({controls:[focusedEdit({value:'old private value',text:'invented by model',args:{text:'invented argument'}})]});
+  const [candidate]=inputCandidates(snapshot,'замени текст на «  hello  »');
+  assert.equal(candidate.targetId,'focused_input');assert.deepEqual(candidate.args,{text:'  hello  '});
+  assert.doesNotMatch(JSON.stringify(candidate),/old private value|invented by model|invented argument/);
+  assert.match(candidate.label,/Заменить всё содержимое/);
+  assert.deepEqual(inputCandidates(structuredClone(snapshot),'замени текст на «  hello  »'),[candidate]);
+  assert.notEqual(inputCandidates(snapshot,'замени текст на «hello»')[0].id,candidate.id);
+  assert.deepEqual(inputCandidates(snapshot,'напиши что-нибудь хорошее'),[]);
+});
+
+test('text replacement requires explicit boolean focus, nonpassword and writable state',()=>{
+  for(const patch of [
+    {hasKeyboardFocus:false},{hasKeyboardFocus:undefined},{hasKeyboardFocus:'true'},
+    {isPassword:true},{isPassword:undefined},{isPassword:0},
+    {readOnly:true},{readOnly:undefined},{readOnly:'false'},
+  ])assert.deepEqual(inputCandidates(fixture({controls:[focusedEdit(patch)]})),[],JSON.stringify(patch));
+  assert.equal(inputCandidates(fixture({controls:[focusedEdit()]})).length,1);
+});
+
+test('text replacement requires a visible enabled ValuePattern Edit in the selected active window',()=>{
+  for(const patch of [
+    {role:'Button'},{enabled:false},{enabled:undefined},{offscreen:true},{offscreen:undefined},
+    {supportsValuePattern:false},{supportsValuePattern:undefined},{windowId:'missing_window'},{windowId:'win_1'},
+  ])assert.deepEqual(inputCandidates(fixture({windows:2,controls:[focusedEdit(patch)]})),[],JSON.stringify(patch));
+  const inactive=fixture({controls:[focusedEdit()]});inactive.windows[0].active=false;
+  assert.deepEqual(inputCandidates(inactive),[]);
+  const unselected=fixture({controls:[focusedEdit()]});unselected.facts.selectedWindowId=null;
+  assert.deepEqual(inputCandidates(unselected),[]);
+});
+
+test('layout candidates use only installed English and Russian with fixed unique arguments',()=>{
+  const snapshot=fixture();snapshot.elements[0].capabilities.push('set_keyboard_language');
+  snapshot.windows[0].availableKeyboardLanguages=['English','Russian','German','english',null];
+  const candidates=buildWindowsCandidates(snapshot,'смени раскладку на английскую').candidates.filter(c=>c.operation==='set_keyboard_language');
+  assert.deepEqual(candidates.map(c=>c.args.language).sort(),['English','Russian']);
+  for(const candidate of candidates){assert.equal(candidate.targetId,'win_0');assert.deepEqual(Object.keys(candidate.args),['language']);assert.ok(candidate.label.includes(candidate.args.language));}
+  const same=buildWindowsCandidates(snapshot,'выбери раскладку French').candidates.filter(c=>c.operation==='set_keyboard_language');
+  assert.deepEqual(same.map(c=>[c.id,c.args]).sort(),candidates.map(c=>[c.id,c.args]).sort());
+  snapshot.windows[0].availableKeyboardLanguages=['Russian'];
+  assert.deepEqual(buildWindowsCandidates(snapshot,'English').candidates.filter(c=>c.operation==='set_keyboard_language').map(c=>c.args.language),['Russian']);
+});
+
+test('layout does not invent an installed language or expose an inactive window effect',()=>{
+  const snapshot=fixture({windows:2});for(const element of snapshot.elements)element.capabilities.push('set_keyboard_language');
+  assert.equal(buildWindowsCandidates(snapshot,'English').candidates.some(c=>c.operation==='set_keyboard_language'),false);
+  for(const window of snapshot.windows)window.availableKeyboardLanguages=['English'];
+  const available=buildWindowsCandidates(snapshot,'English').candidates.filter(c=>c.operation==='set_keyboard_language');
+  assert.deepEqual(available.map(c=>c.targetId),['win_0']);
+  snapshot.windows[0].active=false;
+  assert.equal(buildWindowsCandidates(snapshot,'English').candidates.some(c=>c.operation==='set_keyboard_language'),false);
+});
+
+test('duplicate installed keyboard language records cannot produce duplicate action IDs',()=>{
+  const snapshot=fixture();snapshot.elements[0].capabilities.push('set_keyboard_language');
+  snapshot.windows[0].availableKeyboardLanguages=['English','English','Russian','Russian'];
+  const candidates=buildWindowsCandidates(snapshot,'English').candidates.filter(c=>c.operation==='set_keyboard_language');
+  assert.equal(candidates.length,2);assert.equal(new Set(candidates.map(c=>c.id)).size,candidates.length);
 });

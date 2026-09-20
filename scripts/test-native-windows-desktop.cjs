@@ -22,10 +22,12 @@ const fixtureExe = path.join(repo, 'work', 'desktop-lab', 'bin', 'JeffDesktopLab
 const helperExe = path.join(helperDir, 'JeffWindowsDesktopHelper.exe');
 const reviewExe = path.join(helperDir, 'ReviewTests.exe');
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
-function command(executable, args) {
-  const result = spawnSync(executable, args, { cwd: repo, windowsHide: true, stdio: 'inherit', timeout: 120_000 });
+function command(executable, args, capture = false) {
+  const result = spawnSync(executable, args, { cwd: repo, windowsHide: true, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8', timeout: 120_000 });
+  if (capture) { if (result.stdout) process.stdout.write(result.stdout); if (result.stderr) process.stderr.write(result.stderr); }
   if (result.error) throw result.error;
   assert.equal(result.status, 0, `${path.basename(executable)} failed`);
+  return result.stdout || '';
 }
 
 let fixture;
@@ -38,9 +40,11 @@ async function run() {
   if (!skipBuild) command('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(repo, 'scripts', 'build-windows-desktop.ps1'), '-OutputDirectory', helperDir]);
   assert.ok(fs.existsSync(helperExe), 'Build the requested helper directory first');
   command(path.join(process.env.WINDIR, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'), [
-    '/nologo', '/target:exe', '/platform:x64', `/out:${reviewExe}`, path.join(repo, 'native', 'windows-desktop', 'ReviewTests.cs'),
+    '/nologo', '/target:exe', '/platform:x64', '/codepage:65001', `/out:${reviewExe}`, path.join(repo, 'native', 'windows-desktop', 'ReviewTests.cs'),
   ]);
-  command(reviewExe, [helperExe, fixtureExe]);
+  const targetedOutput = command(reviewExe, [helperExe, fixtureExe], true);
+  const targetedChecks = Number(targetedOutput.match(/PASSED (\d+)/)?.[1]);
+  assert.ok(Number.isInteger(targetedChecks) && targetedChecks > 0, 'Targeted test runner must report its actual check count');
 
   // This visible window is a newly launched, disposable test fixture.
   fixture = spawn(fixtureExe, [], { windowsHide: false, stdio: 'ignore' });
@@ -142,7 +146,7 @@ async function run() {
   assert.equal(snapshot.windows.length, 0);
   assert.equal(snapshot.facts.selectedWindowId, null);
   checks.push('graceful close verified by original window absence');
-  const result = { passed: true, targetedChecks: 23, checks, receipt: { operation: receipt.operation, verified: receipt.verified, evidence: receipt.evidence }, at: new Date().toISOString() };
+  const result = { passed: true, targetedChecks, checks, receipt: { operation: receipt.operation, verified: receipt.verified, evidence: receipt.evidence }, at: new Date().toISOString() };
   fs.writeFileSync(path.join(work, 'native-test-result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
 }

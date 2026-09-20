@@ -1,11 +1,15 @@
 import {createHash} from 'node:crypto';
 
-export const WINDOWS_OPERATIONS=new Set(['inspect','activate','minimize','maximize','restore','close','select','invoke','toggle','expand','collapse']);
+export const WINDOWS_OPERATIONS=new Set(['inspect','activate','minimize','maximize','restore','close','select','invoke','toggle','expand','collapse','set_keyboard_language','replace_text']);
 const fail=()=>Object.assign(new Error('WINDOWS_INVALID_SNAPSHOT'),{code:'WINDOWS_INVALID_SNAPSHOT'});
 const riskyLabel=/(?:\b(?:delete|erase|remove|send|submit|pay|purchase|buy|install|password|sign.?in|log.?in|security|permission|format|reset|subscribe)\b|удал|стереть|отправ|оплат|купить|установить|парол|войти|безопасност|разрешени|форматир|сброс|подписат)/iu;
 const exactAuthLabel=/^\s*вход[.!…]?\s*$/iu;
 const verbs={inspect:'Прочитать элементы окна',activate:'Открыть / показать окно на переднем плане',minimize:'Свернуть окно',maximize:'Развернуть окно на весь экран',restore:'Восстановить обычный размер окна',close:'Закрыть окно',select:'Выбрать элемент',invoke:'Нажать кнопку',toggle:'Переключить состояние',expand:'Раскрыть',collapse:'Свернуть список'};
 const digest=value=>createHash('sha256').update(value).digest('hex').slice(0,24);
+export function replacementLiteral(command){
+  const match=/^\s*замени текст на (?:«([^»]*)»|"([^"\n]*)")[.!]?\s*$/iu.exec(String(command));
+  return match?(match[1]??match[2]):null;
+}
 
 export function validateWindowsSnapshot(value){
   if(!value||typeof value.version!=='string'||!/^[a-f0-9]{16,128}$/i.test(value.version)||!Array.isArray(value.elements)||value.elements.length>300||!Array.isArray(value.windows)||value.windows.length>64)throw fail();
@@ -32,18 +36,26 @@ export function buildWindowsCandidates(snapshot,command,{page=0,apps=[]}={}){
   const words=String(command).toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu)??[];
   const selected=snapshot.facts?.selectedWindowId;
   const actions=[];
+  const literal=replacementLiteral(command);
   for(const e of snapshot.elements){
     const isWindow=windowIds.has(e.id);
     for(const operation of e.capabilities){
       if(isWindow&&(e.id===selected?operation==='inspect':operation!=='inspect'))continue;
       // High-impact controls require a separate explicitly reviewed workflow.
       if(!isWindow&&(riskyLabel.test(e.name??e.label)||exactAuthLabel.test(e.name??e.label)))continue;
+      const owner=snapshot.windows.find(w=>w.id===(isWindow?e.id:e.windowId));
+      if(operation==='replace_text'&&(literal===null||e.role!=='Edit'||e.windowId!==selected||owner?.active!==true||e.hasKeyboardFocus!==true||e.isPassword!==false||e.readOnly!==false||e.enabled!==true||e.offscreen!==false||e.supportsValuePattern!==true))continue;
+      if(operation==='set_keyboard_language'&&(!isWindow||owner?.active!==true))continue;
+      const variants=operation==='set_keyboard_language'?[...new Set(owner?.availableKeyboardLanguages??[])].filter(l=>['English','Russian'].includes(l)).map(language=>({language})):[operation==='replace_text'?{text:literal}:null];
+      for(const args of variants){
       const position=e.role==='TabItem'&&Number.isInteger(e.order)?`; visual order ${e.order}${e.orderIsPartial?' (among observed tabs; may be incomplete)':''}`:'';
       const identity=isWindow?'':` [${e.role}${position}; target ${e.id}]`;
-      const label=`${verbs[operation]}: ${e.label.slice(0,360)}${identity}`.slice(0,500);
+      const verb=operation==='set_keyboard_language'?`Переключить раскладку на ${args.language}`:operation==='replace_text'?`Заменить всё содержимое сфокусированного поля на точный текст из команды (${literal.length} символов)` :verbs[operation];
+      const label=`${verb}: ${e.label.slice(0,360)}${identity}`.slice(0,500);
       const relevance=words.reduce((sum,w)=>sum+(label.toLocaleLowerCase().includes(w)?3:0),0);
-      actions.push({id:'a_'+digest(snapshot.version+'\0'+e.id+'\0'+operation),targetId:e.id,operation,label,
+      actions.push({id:'a_'+digest(snapshot.version+'\0'+e.id+'\0'+operation+(args?'\0'+JSON.stringify(args):'')),targetId:e.id,operation,label,...(args?{args}:{}),
         score:relevance+(e.id===selected?8:0)+(isWindow&&operation==='inspect'?1:0),isWindow});
+      }
     }
   }
   for(const app of apps){
@@ -64,7 +76,7 @@ export function buildWindowsCandidates(snapshot,command,{page=0,apps=[]}={}){
 
 export function windowsObservation(snapshot,{omitted=0,candidates=[]}={}){
   const selected=snapshot.windows.find(w=>w.id===snapshot.facts?.selectedWindowId);
-  const windows=snapshot.windows.map(w=>({id:w.id,title:w.title,app:w.processName,minimized:w.minimized,maximized:w.maximized,active:w.active}));
+  const windows=snapshot.windows.map(w=>({id:w.id,title:w.title,app:w.processName,minimized:w.minimized,maximized:w.maximized,active:w.active,...(w.keyboardLanguage?{keyboardLanguage:w.keyboardLanguage,availableKeyboardLanguages:w.availableKeyboardLanguages}:{})}));
   const preferred=new Set(candidates.map(c=>c.targetId));
   const controls=snapshot.elements.filter(e=>!windows.some(w=>w.id===e.id)).sort((a,b)=>Number(preferred.has(b.id))-Number(preferred.has(a.id))||Number(b.selected===true)-Number(a.selected===true)).map(e=>({
     id:e.id,name:(e.name??e.label).slice(0,200),role:e.role,

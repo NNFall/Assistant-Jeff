@@ -1,13 +1,14 @@
 {
   "name": "assistant-jeff",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Личный голосовой помощник для Windows",
   "private": true,
   "type": "module",
-  "main": "desktop/main.mjs",
+  "main": "scripts/desktop-lab/main.mjs",
   "author": "NNFall",
   "scripts": {
     "start": "electron .",
+    "start:legacy": "electron desktop/main.mjs",
     "test": "node --test tests/*.test.mjs",
     "lab": "electron scripts/desktop-lab/main.mjs",
     "lab:fixture": "electron scripts/desktop-lab/fixture-main.mjs",
@@ -16,8 +17,10 @@
     "windows": "electron scripts/desktop-lab/main.mjs",
     "lab:test": "node scripts/test-native-desktop-lab.mjs",
     "lab:eval": "node scripts/eval-jev-prompts.mjs",
-    "build": "electron-builder --win nsis --x64",
-    "pack": "electron-builder --dir --win --x64"
+    "voice:install": "powershell -NoProfile -File scripts/install-voice-runtime.ps1",
+    "prepare:runtime": "powershell -NoProfile -File scripts/prepare-windows-runtime.ps1",
+    "build": "npm run prepare:runtime && electron-builder --win nsis --x64",
+    "pack": "npm run prepare:runtime && electron-builder --dir --win --x64"
   },
   "dependencies": {
     "onnxruntime-node": "^1.30.0",
@@ -37,6 +40,14 @@
     },
     "files": [
       "desktop/**/*",
+      "scripts/desktop-lab/main.mjs",
+      "scripts/desktop-lab/preload.cjs",
+      "scripts/desktop-lab/lab.html",
+      "scripts/desktop-lab/lab.css",
+      "scripts/desktop-lab/lab.js",
+      "scripts/desktop-lab/voice-client.mjs",
+      "scripts/desktop-lab/journal.mjs",
+      "scripts/windows-desktop/*.mjs",
       "package.json"
     ],
     "extraResources": [
@@ -46,6 +57,30 @@
         "filter": [
           "*.onnx"
         ]
+      },
+      {
+        "from": "work/windows-desktop/bin",
+        "to": "windows-desktop",
+        "filter": ["JeffWindowsDesktopHelper.exe", "JeffWindowsDesktopHelper.exe.config", "*.dll", "licenses/**/*", "artifacts.json", "dependencies.json"]
+      },
+      {
+        "from": "scripts/windows-desktop/read-apps.ps1",
+        "to": "windows-desktop/read-apps.ps1"
+      },
+      {
+        "from": "work/voice-runtime/piper",
+        "to": "voice-runtime/piper",
+        "filter": ["piper.exe", "*.dll", "libtashkeel_model.ort", "espeak-ng-data/**/*", "licenses/**/*", "runtime-manifest.json"]
+      },
+      {
+        "from": "work/voice-runtime/ffmpeg",
+        "to": "voice-runtime/ffmpeg",
+        "filter": ["ffmpeg.exe", "LICENSE", "runtime-manifest.json"]
+      },
+      {
+        "from": "data/tts/piper",
+        "to": "voices",
+        "filter": ["ru_RU-denis-medium.onnx", "ru_RU-denis-medium.onnx.json", "denis-MODEL_CARD.md"]
       }
     ],
     "asarUnpack": [

@@ -34,6 +34,47 @@ internal static class ReviewTests
         try
         {
             var assembly = Assembly.LoadFrom(args[0]); var helperType = assembly.GetType("WindowsDesktopHelper");
+            using (var timeoutHelper = (IDisposable)Activator.CreateInstance(helperType, BindingFlags.NonPublic | BindingFlags.Instance, null, new object[]{0,0}, null))
+            {
+                var automation = helperType.GetField("automation",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(timeoutHelper);
+                var timeoutProperty = automation.GetType().GetProperty("TransactionTimeout");
+                var withTimeout = helperType.GetMethod("WithMutationTimeout",BindingFlags.NonPublic|BindingFlags.Instance);
+                int calls=0; bool bounded=false,failed=false;
+                Action throwingMutation=delegate {calls++;bounded=(TimeSpan)timeoutProperty.GetValue(automation,null)==TimeSpan.FromMilliseconds(2000);throw new InvalidOperationException("EXPECTED_TEST_EXCEPTION");};
+                try {withTimeout.Invoke(timeoutHelper,new object[]{throwingMutation});}
+                catch(TargetInvocationException error){failed=error.InnerException.Message=="EXPECTED_TEST_EXCEPTION";}
+                Check(failed && calls==1 && bounded,"mutation timeout permits exactly one 2000ms attempt");
+                Check((TimeSpan)timeoutProperty.GetValue(automation,null)==TimeSpan.FromMilliseconds(650),"read timeout restored after mutation exception");
+                withTimeout.Invoke(timeoutHelper,new object[]{(Action)delegate {calls++;}});
+                Check(calls==2 && (TimeSpan)timeoutProperty.GetValue(automation,null)==TimeSpan.FromMilliseconds(650),"successful mutation runs once and restores read timeout");
+            }
+            var limitedIdentity = helperType.GetMethod("ReadLimitedProcessIdentity", BindingFlags.NonPublic | BindingFlags.Static);
+            using (var own = Process.GetCurrentProcess())
+            {
+                var ownIdentity = limitedIdentity.Invoke(null,new object[]{own.Id});
+                Check(ownIdentity!=null,"limited-information query identifies own process");
+                var type=ownIdentity.GetType();
+                Check((int)type.GetField("Pid").GetValue(ownIdentity)==own.Id && (int)type.GetField("Session").GetValue(ownIdentity)==own.SessionId,"limited-information query preserves PID and session");
+                Check((long)type.GetField("Started").GetValue(ownIdentity)==own.StartTime.ToUniversalTime().Ticks,"limited-information creation time matches process identity");
+                Check(String.Equals((string)type.GetField("Path").GetValue(ownIdentity),Path.GetFullPath(own.MainModule.FileName),StringComparison.OrdinalIgnoreCase),"limited-information path matches actual executable");
+            }
+            Check(limitedIdentity.Invoke(null,new object[]{0})==null,"limited-information query rejects invalid PID");
+            var taskManagerPath = helperType.GetMethod("IsTaskManagerPath", BindingFlags.NonPublic | BindingFlags.Static);
+            string canonicalTaskManager = Path.Combine(Environment.SystemDirectory,"Taskmgr.exe");
+            Check((bool)taskManagerPath.Invoke(null,new object[]{canonicalTaskManager}),"canonical System32 Task Manager path allowed");
+            Check((bool)taskManagerPath.Invoke(null,new object[]{canonicalTaskManager.ToUpperInvariant()}),"canonical Task Manager path is case-insensitive");
+            Check(!(bool)taskManagerPath.Invoke(null,new object[]{Path.Combine(Environment.SystemDirectory,"elsewhere","Taskmgr.exe")}),"Task Manager filename under another directory rejected");
+            Check(!(bool)taskManagerPath.Invoke(null,new object[]{Path.Combine(Environment.SystemDirectory,"Taskmgr-copy.exe")}),"different System32 filename rejected");
+            Check(!(bool)taskManagerPath.Invoke(null,new object[]{null}),"missing Task Manager path rejected");
+            var replacementText = helperType.GetMethod("ReplacementText", BindingFlags.NonPublic | BindingFlags.Static);
+            Check((string)replacementText.Invoke(null,new object[]{new Dictionary<string,object>{{"text","literal\r\n\t😀"}}})=="literal\r\n\t😀","literal replacement preserves allowed Unicode and whitespace");
+            Check((string)replacementText.Invoke(null,new object[]{new Dictionary<string,object>{{"text",""}}})=="","explicit empty replacement accepted");
+            foreach (object invalid in new object[]{null,123,new string('x',4097),"\0","\u001b","\ud800","\udc00"})
+            {
+                bool rejected=false;try {replacementText.Invoke(null,new object[]{new Dictionary<string,object>{{"text",invalid}}});}
+                catch(TargetInvocationException error){rejected=error.InnerException.Message=="INVALID_TEXT_PAYLOAD";}
+                Check(rejected,"invalid replacement payload rejected");
+            }
             var rank=helperType.GetMethod("AssignTabOrder",BindingFlags.NonPublic|BindingFlags.Static);
             var groupType=assembly.GetType("TabGroupState");var groupDictionaryType=typeof(Dictionary<,>).MakeGenericType(typeof(string),groupType);
             var groups=(IDictionary)Activator.CreateInstance(groupDictionaryType);var coverage=Activator.CreateInstance(groupType);
@@ -57,6 +98,7 @@ internal static class ReviewTests
             Check((string)invoke.Invoke(null,new object[]{Snapshot("Play",true,"available"),after,"win_test"}) == "effect_outcome_unknown","truncated before cannot prove invoke");
             Check((string)invoke.Invoke(null,new object[]{before,Snapshot("Pause",false,"provider_unavailable"),"win_test"}) == "effect_outcome_unknown","unavailable after cannot prove invoke");
             Check((string)invoke.Invoke(null,new object[]{before,null,"win_test"}) == "effect_outcome_unknown","absent after cannot prove invoke");
+            if(args.Length>2 && args[2]=="--pure") { Console.WriteLine("PASSED " + checks);return 0; }
             fixture = Process.Start(new ProcessStartInfo(args[1]) { UseShellExecute = false }); Thread.Sleep(700);
             helper = Activator.CreateInstance(helperType, BindingFlags.NonPublic | BindingFlags.Instance, null, new object[]{0,fixture.Id}, null);
             var observe = helperType.GetMethod("Observe",BindingFlags.NonPublic|BindingFlags.Instance);

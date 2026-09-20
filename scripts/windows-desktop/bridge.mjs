@@ -31,7 +31,16 @@ export class WindowsBridge {
       let result;try{result=JSON.parse(line);}catch{return this.close('WINDOWS_INVALID_RESPONSE');}
       const entry=this.pending.get(result.id);if(!entry)return;
       this.pending.delete(result.id);entry.cleanup();
-      result.ok?entry.resolve(result.result):entry.reject(failure(/^[A-Z_]{1,64}$/.test(result.error?.code)?result.error.code:'WINDOWS_NATIVE_REJECTED'));
+      if(result.ok)entry.resolve(result.result);
+      else{
+        const rejected=failure(/^[A-Z_]{1,64}$/.test(result.error?.code)?result.error.code:'WINDOWS_NATIVE_REJECTED');
+        const details={};
+        if(/^[a-z_]{1,64}$/.test(result.error?.stage??''))details.stage=result.error.stage;
+        if(/^0x[A-Fa-f0-9]{8}$/.test(result.error?.providerCode??''))details.providerCode=result.error.providerCode;
+        if(typeof result.error?.effectAttempted==='boolean')details.effectAttempted=result.error.effectAttempted;
+        if(Object.keys(details).length)rejected.details=details;
+        entry.reject(rejected);
+      }
     });
   }
   async request(method,args={},signal){

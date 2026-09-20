@@ -19,6 +19,20 @@ contextBridge.exposeInMainWorld('lab', {
   },
   openLogs: () => ipcRenderer.invoke('lab:openLogs'),
   stop: () => ipcRenderer.invoke('lab:stop'),
+  voiceStatus: () => ipcRenderer.invoke('lab:voiceStatus'),
+  voiceStart: (options = {}) => ipcRenderer.invoke('lab:voiceStart', { mode: options.mode === 'manual' ? 'manual' : 'wake' }),
+  voiceStop: () => ipcRenderer.invoke('lab:voiceStop'),
+  voiceActivate: () => ipcRenderer.invoke('lab:voiceActivate'),
+  voiceFinish: () => ipcRenderer.invoke('lab:voiceFinish'),
+  voiceSettings: patch => ipcRenderer.invoke('lab:voiceSettings', patch),
+  audioChunk: pcm => { if (pcm instanceof Int16Array && pcm.length === 1280) ipcRenderer.send('lab:audio', pcm); },
+  speechEnded: request => ipcRenderer.invoke('lab:speechEnded', { id: typeof request?.id === 'string' ? request.id.slice(0,64) : '' }),
+  onVoiceEvent: callback => {
+    if (typeof callback !== 'function') throw new TypeError('Expected a callback');
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('lab:voice', listener);
+    return () => ipcRenderer.removeListener('lab:voice', listener);
+  },
   onProgress: (callback) => {
     if (typeof callback !== 'function') throw new TypeError('Expected a callback');
     const listener = (_event, data) => callback(data);

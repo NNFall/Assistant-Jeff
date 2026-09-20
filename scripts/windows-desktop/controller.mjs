@@ -98,7 +98,7 @@ export class WindowsDesktop {
         gate();const fresh=await this.observe(signal);
         const unchanged=expectedWindowVersion?fresh.windows.find(w=>w.id===candidate.targetId)?.stateVersion===expectedWindowVersion:fresh.version===before.version;
         if(!unchanged){await event('stale',{step,expectedVersion:before.version,observedVersion:fresh.version,message:'Интерфейс изменился; решение пересчитывается.'});page=0;continue;}
-        const execution={targetId:candidate.targetId,operation:candidate.operation,expectedVersion:fresh.version,...(expectedWindowVersion?{expectedWindowVersion}:{})};
+        const execution={targetId:candidate.targetId,operation:candidate.operation,...(candidate.args??{}),expectedVersion:fresh.version,...(expectedWindowVersion?{expectedWindowVersion}:{})};
         await event('execute_request',{step,candidate,...execution,message:candidate.label});gate();
         let receipt;
         try{inFlightEffect=candidate.operation!=='inspect';receipt=candidate.operation==='launch'?await this.launch(candidate,fresh,signal):await this.bridge.request('execute',execution,signal);inFlightEffect=false;}
@@ -113,7 +113,7 @@ export class WindowsDesktop {
         page=0;
       }
       return report;
-    }catch(e){report.ok=false;report.executionUncertain=inFlightEffect;report.reason=signal.aborted?(signal.reason==='time_limit'?'time_limit':'aborted'):safeCode(e.code);return report;}
+    }catch(e){report.ok=false;report.executionUncertain=inFlightEffect;if(e.details)report.errorDetails=e.details;report.reason=signal.aborted?(signal.reason==='time_limit'?'time_limit':'aborted'):safeCode(e.code);return report;}
     finally{
       finishing=true;clearTimeout(timer);report.elapsedMs=Math.round(performance.now()-started);
       if(journal)try{await event('result',{ok:report.ok,reason:report.reason,elapsedMs:report.elapsedMs,message:report.ok?'Выполнение завершено; результат записан.':`Остановка: ${report.reason}`});report.events=journal.events;await journal.finish(report);}catch{report.ok=false;report.reason='LOG_WRITE_FAILED';report.events=journal.events;}

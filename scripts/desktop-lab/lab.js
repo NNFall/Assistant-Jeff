@@ -1,12 +1,18 @@
 'use strict';
 
+import { VoiceClient } from './voice-client.mjs';
+
 const $ = (id) => document.getElementById(id);
 const presets = {
   custom: { command: '' },
   chrome: { command: 'Сверни Google Chrome.' },
   music: { command: 'Разверни Яндекс Музыку на весь экран.' },
   steam: { command: 'Открой Steam.' },
+  taskmgr: { command: 'Открой диспетчер задач.' },
   tabs: { command: 'Найди первую вкладку ВКонтакте в Яндекс Браузере.' },
+  note: { command: 'Заметка: купить хлеб.' },
+  reminder: { command: 'Напомни через 10 минут проверить чай.' },
+  question: { command: 'Объясни, что такое оперативная память.' },
 };
 const messages = {
   TARGET_MINIMIZED: 'Нужное окно свёрнуто; его элементы сейчас могут быть недоступны.',
@@ -17,6 +23,7 @@ const messages = {
   TARGET_WINDOW_MISSING: 'Нужное окно больше не доступно. Обновите окна и повторите задачу.',
   WINDOW_CLOSED: 'Окно закрылось во время выполнения.',
   ACCESS_DENIED: 'Windows не разрешила доступ к этому приложению. Оно может работать с повышенными правами.',
+  APP_ELEVATION_REQUIRED: 'Приложению нужны права администратора. Запустите его вручную; Jeff не подтверждает повышение прав.',
   UIA_UNAVAILABLE: 'Приложение не предоставило доступ к нужным элементам через Windows UI Automation.',
   ELEMENT_NOT_FOUND: 'Нужный элемент больше не доступен. Состояние приложения могло измениться.',
   STALE_SNAPSHOT: 'Состояние окна изменилось после наблюдения. Действие по старым данным не выполнено.',
@@ -50,6 +57,10 @@ const messages = {
   time_limit: 'Достигнут лимит времени задачи.',
   step_limit: 'Достигнут лимит шагов. Посмотрите журнал перед повторным запуском.',
   LOG_WRITE_FAILED: 'Не удалось сохранить журнал. Выполнение остановлено.',
+  local_completed: 'Локальная операция выполнена.',
+  local_rejected: 'Локальная операция не выполнена.',
+  chat_answer: 'Получен ответ Gemini.',
+  chat_failed: 'Не удалось получить ответ Gemini.',
 };
 let pending = false;
 let opening = false;
@@ -63,6 +74,10 @@ let reportReceived = false;
 let currentRunId = null;
 let lastFinishedRunId = null;
 let historyLoading = false;
+let voice = null;
+let voiceState = { state: 'off', enabled: false, busy: false, ready: false, settings: { activationBeep: true, denisReply: true, voiceAutoExecute: true } };
+let taskSource = null;
+const voiceLabels = { off: 'Микрофон: выкл', idle: 'Микрофон: выкл', stopped: 'Микрофон: выкл', loading: 'Подключение микрофона', waiting: 'Ожидаю Jarvis', recording: 'Слушаю команду', transcribing: 'Распознаю речь', ready: 'Готовлю команду', processing: 'Выполняю задачу', speaking: 'Отвечает Денис', error: 'Ошибка микрофона' };
 
 function value(input) {
   if (input === undefined || input === null) return '—';
@@ -84,15 +99,20 @@ function checked(result) {
   return result;
 }
 function sync() {
-  const busy = pending || opening || remoteRunning;
-  $('run').disabled = busy || !$('command').value.trim();
+  const busy = pending || opening || remoteRunning || voiceState.busy;
+  $('run').disabled = busy || !$('command').value.trim() || $('command').value.length > 1024;
   $('start').disabled = busy || refreshing;
   $('scenario').disabled = busy;
   $('command').disabled = busy;
   $('refresh').disabled = opening || refreshing;
-  $('stop').disabled = !(pending || remoteRunning) || stopping;
+  $('stop').disabled = !(pending || remoteRunning || voiceState.busy) || stopping;
   $('stop').textContent = stopping ? 'Останавливаем…' : 'Стоп';
-  $('status').textContent = stopping ? 'Остановка' : pending || remoteRunning ? 'Выполняется' : opening || refreshing ? 'Обновление окон' : 'Готов к задаче';
+  $('status').textContent = stopping ? 'Остановка' : pending || remoteRunning ? 'Выполняется' : voiceState.busy ? (voiceLabels[voiceState.state] || 'Голосовой ввод') : opening || refreshing ? 'Обновление окон' : 'Готов к задаче';
+  $('voice-wake').disabled = !voice || voiceState.ready === false || (!voiceState.enabled && (pending || remoteRunning || opening || voiceState.busy));
+  $('voice-wake').textContent = voiceState.enabled ? 'Выключить микрофон' : 'Ожидать Jarvis';
+  $('voice-manual').disabled = !voice || voiceState.ready === false || pending || remoteRunning || opening || voiceState.busy;
+  $('voice-finish').disabled = !voice || voiceState.state !== 'recording';
+  for (const id of ['voice-beep', 'voice-reply', 'voice-auto']) $(id).disabled = !voice || voiceState.ready === false || voiceState.busy || pending;
 }
 function resetScenario() {
   const preset = presets[$('scenario').value];
@@ -181,11 +201,45 @@ async function refresh() {
   })();
   try { await refreshPromise; } finally { refreshPromise = null; }
 }
+function beginReport(command, source) {
+  taskSource = source; pending = true; stopping = false; error(); progressCount = 0; progressEvents = []; $('decisions').replaceChildren();
+  reportReceived = false; currentRunId = null;
+  $('plan').textContent = command; $('goal-status').textContent = 'Проверяем задачу по текущему состоянию Windows…'; $('run-meta').textContent = '';
+  $('verification').textContent = 'Проверка выполняется…'; $('verification').className = 'verification';
+  $('trace').textContent = 'Ожидаем отчёт'; $('result-meta').textContent = ''; $('activity').textContent = 'Получаем наблюдение и решение модели…'; sync();
+}
+function renderReport(report, command = '') {
+  reportReceived = true;
+  lastFinishedRunId = report?.runId ?? currentRunId ?? lastFinishedRunId;
+  if (report?.error && !report?.reason) checked(report);
+  if (report?.error) error(friendly(report.error));
+  const uncertain = report?.executionUncertain === true;
+  const verified = !uncertain && report?.ok === true && report?.reason === 'goal_verified';
+  const observed = !uncertain && report?.ok === true && report?.reason === 'goal_observed';
+  const local = report?.mode === 'LOCAL_ASSISTANT';
+  const chat = report?.mode === 'GEMINI_CHAT';
+  const localCompleted = !uncertain && local && report?.ok === true && report?.reason === 'local_completed';
+  const chatAnswered = !uncertain && chat && report?.ok === true && report?.reason === 'chat_answer';
+  const reply = typeof report?.message === 'string' ? report.message : '';
+  const completedCount = Array.isArray(report?.completed) ? report.completed.length : 0;
+  const verifiedMessage = completedCount ? messages.goal_verified : 'Jev считает цель достигнутой по текущему состоянию Windows; действий не потребовалось.';
+  $('verification').className = `verification ${verified || localCompleted ? 'success' : observed ? 'observed' : chatAnswered ? 'answer' : 'failed'}`;
+  const reason = friendly(report?.reason);
+  $('verification').textContent = uncertain ? messages.stopped_during_action : local || chat ? [chatAnswered ? 'Ответ Gemini' : localCompleted ? 'Локальная операция выполнена' : reason, reply].filter(Boolean).join(chat ? '\n' : ': ') : verified ? verifiedMessage : observed ? messages.goal_observed : `Результат не подтверждён${report?.reason ? ': ' + reason : '.'}`;
+  const callsCount = Array.isArray(report?.calls) ? report.calls.length : 0;
+  $('result-meta').textContent = `${chat ? 'Текстовый ответ' : local ? `Локальных операций: ${completedCount}` : `Выполнено действий: ${completedCount}`} · общее время: ${value(report?.elapsedMs)} мс · вызовов модели: ${callsCount}`;
+  $('plan').textContent = report?.plan ? pretty(report.plan) : value(report?.goal ?? report?.command ?? command);
+  $('goal-status').textContent = uncertain ? 'Результат последнего действия неизвестен.' : chat ? 'Текстовый запрос к Gemini; действия Windows не выполнялись.' : local ? reason : verified ? verifiedMessage : observed ? messages.goal_observed : 'Завершение задачи не подтверждено.';
+  $('run-meta').textContent = `Сессия: ${value(report?.runId)} · Журнал: ${value(report?.logPath)}`;
+  if (!progressCount && Array.isArray(report?.events ?? report?.trace)) (report.events ?? report.trace).forEach(addDecision);
+  $('trace').textContent = pretty(report);
+  $('activity').textContent = uncertain ? messages.stopped_during_action : stopping ? 'Запрос завершён после команды остановки. См. фактический результат проверки.' : 'Выполнение завершено. Результат и журнал — ниже.';
+}
 $('scenario').addEventListener('change', resetScenario);
 $('command').addEventListener('input', () => { $('scenario').value = 'custom'; updateCounter(); });
 $('refresh').addEventListener('click', () => { error(); void refresh(); });
 $('start').addEventListener('click', async () => {
-  if (pending || opening || remoteRunning) return;
+  if (pending || opening || remoteRunning || voiceState.busy) return;
   opening = true; error(); $('activity').textContent = 'Получаем окна и доступные элементы Windows…'; sync();
   try {
     const state = await window.lab.start(); renderState(state);
@@ -194,38 +248,14 @@ $('start').addEventListener('click', async () => {
   finally { opening = false; sync(); }
 });
 $('run').addEventListener('click', async () => {
-  if (pending || opening || remoteRunning) return;
+  if (pending || opening || remoteRunning || voiceState.busy) return;
   const command = $('command').value.trim();
   if (!command || command.length > 1024) return error('Введите команду до 1024 символов.');
-  pending = true; stopping = false; error(); progressCount = 0; progressEvents = []; $('decisions').replaceChildren();
-  reportReceived = false; currentRunId = null;
-  $('plan').textContent = command; $('goal-status').textContent = 'Проверяем задачу по текущему состоянию Windows…'; $('run-meta').textContent = '';
-  $('verification').textContent = 'Проверка выполняется…'; $('verification').className = 'verification';
-  $('trace').textContent = 'Ожидаем отчёт'; $('result-meta').textContent = ''; $('activity').textContent = 'Получаем наблюдение и решение модели…'; sync();
+  beginReport(command, 'manual');
   try {
     const report = await window.lab.run({ command });
     // IPC progress can arrive after invoke resolves while the final UIA refresh is pending.
-    reportReceived = true;
-    lastFinishedRunId = report?.runId ?? currentRunId ?? lastFinishedRunId;
-    if (report?.error && !report?.reason) checked(report);
-    if (report?.error) error(friendly(report.error));
-    const uncertain = report?.executionUncertain === true;
-    const verified = !uncertain && report?.ok === true && report?.reason === 'goal_verified';
-    const observed = !uncertain && report?.ok === true && report?.reason === 'goal_observed';
-    const completedCount = Array.isArray(report?.completed) ? report.completed.length : 0;
-    const verifiedMessage = completedCount ? messages.goal_verified : 'Jev считает цель достигнутой по текущему состоянию Windows; действий не потребовалось.';
-    $('verification').className = `verification ${verified ? 'success' : observed ? 'observed' : 'failed'}`;
-    const reason = friendly(report?.reason);
-    $('verification').textContent = uncertain ? messages.stopped_during_action : verified ? verifiedMessage : observed ? messages.goal_observed : `Результат не подтверждён${report?.reason ? ': ' + reason : '.'}`;
-    const callsCount = Array.isArray(report?.calls) ? report.calls.length : 0;
-    $('result-meta').textContent = `Выполнено действий: ${completedCount} · общее время: ${value(report?.elapsedMs)} мс · вызовов модели: ${callsCount}`;
-    $('plan').textContent = report?.plan ? pretty(report.plan) : value(report?.goal ?? report?.command ?? command);
-    $('goal-status').textContent = uncertain ? 'Результат последнего действия неизвестен.' : verified ? verifiedMessage : observed ? messages.goal_observed : 'Завершение задачи не подтверждено.';
-    $('run-meta').textContent = `Сессия: ${value(report?.runId)} · Журнал: ${value(report?.logPath)}`;
-    $('trace').textContent = pretty(report);
-    if (!progressCount && Array.isArray(report?.events ?? report?.trace)) (report.events ?? report.trace).forEach(addDecision);
-    $('trace').textContent = pretty(report);
-    $('activity').textContent = uncertain ? messages.stopped_during_action : stopping ? 'Запрос завершён после команды остановки. См. фактический результат проверки.' : 'Выполнение завершено. Результат и журнал — ниже.';
+    renderReport(report, command);
   } catch (err) {
     reportReceived = true;
     lastFinishedRunId = currentRunId ?? lastFinishedRunId;
@@ -241,11 +271,12 @@ $('run').addEventListener('click', async () => {
   }
 });
 $('stop').addEventListener('click', async () => {
-  if (stopping || !(pending || remoteRunning)) return;
+  if (stopping || !(pending || remoteRunning || voiceState.busy)) return;
   stopping = true; sync(); $('activity').textContent = 'Остановка запрошена. Ждём завершения текущей операции…';
   try {
+    if (voiceState.enabled || voiceState.busy) await voice?.stop();
     const result = checked(await window.lab.stop());
-    if (result?.stopped !== true) error('Подтверждение остановки не получено.');
+    if (result?.stopped !== true && result?.ok !== true) error('Подтверждение остановки не получено.');
     if (!pending) { stopping = false; await refresh(); }
   } catch (err) { stopping = false; error(friendly(err, 'Не удалось запросить остановку.')); }
   finally { sync(); }
@@ -282,8 +313,85 @@ $('open-logs').addEventListener('click', async () => {
   try { checked(await window.lab.openLogs()); }
   catch (err) { $('history-status').textContent = friendly(err, 'Не удалось открыть папку журналов.'); }
 });
+function voiceError(problem) {
+  const mediaErrors = { NotAllowedError: 'Доступ к микрофону не разрешён. Разрешите его в настройках Windows и приложения.', NotFoundError: 'Микрофон не найден. Подключите устройство и повторите.', NotReadableError: 'Микрофон недоступен или занят другим приложением.' };
+  $('voice-error').textContent = mediaErrors[problem?.name] || friendly(problem, 'Ошибка голосового ввода.');
+  $('voice-error').hidden = false;
+  if (taskSource === 'voice' && pending && !reportReceived) {
+    $('activity').textContent = 'Голосовой ввод остановлен. Проверьте результат задачи и журнал.';
+    pending = false; stopping = false; sync(); void refresh();
+  }
+}
+function renderVoiceState(state) {
+  voiceState = state;
+  $('voice-state').textContent = voiceLabels[state.state] || state.state;
+  $('voice-state').dataset.active = String(state.enabled);
+  const fallback = state.state === 'waiting' ? 'Скажите Jarvis, затем команду.' : state.state === 'recording' ? 'Говорите. Завершите фразу паузой или кнопкой «Закончить».' : state.state === 'off' || state.state === 'idle' ? 'Микрофон выключен. Включите ожидание Jarvis или запишите одну команду.' : voiceLabels[state.state] || 'Голосовой ввод';
+  $('voice-status').textContent = state.message || fallback;
+  $('voice-beep').checked = state.settings.activationBeep;
+  $('voice-reply').checked = state.settings.denisReply;
+  $('voice-auto').checked = state.settings.voiceAutoExecute;
+  $('voice-silence').textContent = `${(state.silenceMs / 1000).toLocaleString('ru-RU')} с`;
+  if (state.state === 'processing' && !pending && !remoteRunning) beginReport($('command').value, 'voice');
+  sync();
+}
+async function handleVoiceEvent(event) {
+  if (event.type === 'speech_warning') {
+    $('voice-warning').textContent = typeof event.message === 'string' ? event.message : 'Голосовой ответ недоступен. Результат показан текстом.';
+    $('voice-warning').hidden = false;
+  } else if (event.type === 'transcription_metrics') {
+    const latency = Number.isFinite(event.latencyMs) ? `${event.latencyMs.toLocaleString('ru-RU')} мс` : 'время не указано';
+    $('voice-metrics').textContent = `Распознавание: ${latency}${typeof event.model === 'string' ? ` · ${event.model}` : ''}`;
+    $('voice-metrics').hidden = false;
+  } else if (event.type === 'reminder') {
+    if (typeof event.text !== 'string' || !event.text.trim()) return;
+    $('voice-reminder').textContent = `Напоминание: ${event.text}`;
+    $('voice-reminder').hidden = false;
+  } else if (event.type === 'wake') {
+    $('voice-transcript').textContent = 'Слушаю команду…';
+    $('voice-warning').hidden = true; $('voice-metrics').hidden = true;
+  } else if (event.type === 'transcript') {
+    $('voice-transcript').textContent = typeof event.text === 'string' && event.text.trim() ? event.text : 'Речь не распознана.';
+    if (event.final === true && typeof event.text === 'string') {
+      $('scenario').value = 'custom'; $('command').value = event.text; updateCounter();
+      if (!voiceState.settings.voiceAutoExecute) $('activity').textContent = 'Команда распознана. Проверьте текст и нажмите «Выполнить».';
+    }
+  } else if (event.type === 'result') {
+    const report = event.report;
+    if (taskSource !== 'voice' || !report || (report.runId && report.runId === lastFinishedRunId) || (currentRunId && report.runId && report.runId !== currentRunId)) return;
+    try { renderReport(report, $('command').value); }
+    catch (error) { voiceError(error); $('trace').textContent = pretty(report); }
+    finally {
+      remoteRunning = false; await refresh(); pending = false; stopping = false; sync();
+      if (!$('history-panel').hidden) void loadHistory();
+    }
+  }
+}
+$('voice-wake').addEventListener('click', async () => {
+  if (!voice) return;
+  $('voice-error').hidden = true;
+  if (voiceState.enabled || voiceState.busy) await voice.stop();
+  else if (!pending && !remoteRunning && !opening) await voice.start('wake');
+});
+$('voice-manual').addEventListener('click', async () => {
+  if (!voice || pending || remoteRunning || opening || voiceState.busy) return;
+  $('voice-error').hidden = true; $('voice-warning').hidden = true; $('voice-metrics').hidden = true; $('voice-transcript').textContent = 'Готовим микрофон…';
+  if (voiceState.enabled) await voice.activate(); else await voice.start('manual');
+});
+$('voice-finish').addEventListener('click', () => { void voice?.finish(); });
+for (const [id, key] of [['voice-beep', 'activationBeep'], ['voice-reply', 'denisReply'], ['voice-auto', 'voiceAutoExecute']]) {
+  $(id).addEventListener('change', () => { if (voice) void voice.setSettings({ [key]: $(id).checked }); });
+}
 resetScenario();
 if (window.lab) {
+  if (typeof window.lab.onVoiceEvent === 'function') {
+    voice = new VoiceClient(window.lab, { onState: renderVoiceState, onEvent: event => { void handleVoiceEvent(event).catch(voiceError); }, onError: voiceError });
+    void voice.initialize();
+    window.addEventListener('beforeunload', () => { void voice?.dispose(); }, { once: true });
+  } else {
+    $('voice-status').textContent = 'Голосовой ввод недоступен в этой версии. Перезапустите обновлённое приложение.';
+  }
+  sync();
   const unsubscribe = window.lab.onProgress((event) => {
     if (!pending || reportReceived) return;
     const eventRunId = typeof event?.runId === 'string' ? event.runId : null;

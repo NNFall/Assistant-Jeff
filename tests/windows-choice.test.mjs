@@ -102,6 +102,17 @@ test('hierarchical access selects a window before exposing its actual operations
   // This verifies hierarchical candidate semantics; live model selection is separate.
 });
 
+test('already achieved observable state takes priority over initial access with no history', () => {
+  const input = { command: 'открой диспечер задач', phase: 'windows', completed: [], observation: { app: 'Windows desktop', summary: 'Task Manager / Диспетчер задач window is visible, nonminimized and foreground.' }, candidates: [{ id: 'taskmgr_inspect', operation: 'inspect', label: 'Выбрать Диспетчер задач' }] };
+  const request = buildWindowsChoiceRequest(input);
+  assert.match(request.questions.next_action.instructions, /choose done BEFORE considering access or another action/u);
+  assert.match(request.questions.next_action.instructions, /Only when the requested goal is NOT already established, choose/u);
+  assert.match(request.questions.next_action.instructions, /Do not inspect or repeat an effect merely to create a history entry/u);
+  assert.match(request.questions.next_action.criteria.done, /with no prior history.*foreground target for open\/show, already minimized for minimize/u);
+  assert.deepEqual(request.state.completed, []);
+  // No fabricated history and no deterministic success bypass; model gates remain tested below.
+});
+
 test('ordered window commands evaluate earlier native evidence and latest applicable state separately', () => {
   const input = {
     command: 'Покажи Google Chrome, затем сверни Google Chrome.', phase: 'windows',
@@ -122,6 +133,49 @@ test('ordered window commands evaluate earlier native evidence and latest applic
   assert.match(request.questions.goal_status.criteria.achieved, /later requested step may supersede an earlier state/u);
   assert.match(request.questions.goal_status.criteria.not_achieved, /Do not select merely because an earlier verified state was intentionally superseded/u);
   // Checks the evidence contract, not live model accuracy or completion acceptance.
+});
+
+test('one-time activation receipt survives a later foreground-only change without relaxing state goals', () => {
+  const input = {
+    command: 'Открой стим.', phase: 'controls', candidates: [],
+    observation: { app: 'Windows desktop', summary: 'Same Steam window remains visible, Normal and nonminimized; Jeff is foreground after user switched back.' },
+    completed: [{ id: 'steam_activate', label: 'Показать Steam', outcome: 'verified', evidence: 'window_active: Steam was observed visible, Normal and foreground immediately after activation.' }],
+  };
+  const request = buildWindowsChoiceRequest(input);
+  assert.deepEqual(request.state.completed, input.completed);
+  for (const question of Object.values(request.questions)) {
+    assert.match(question.instructions, /subsequent foreground change alone does not invalidate that event while the same window is still visible and nonminimized/u);
+    assert.match(question.instructions, /Without such a receipt.*currently foreground target/u);
+    assert.match(question.instructions, /target now closed or minimized does not satisfy this event rule/u);
+    assert.match(question.instructions, /does not relax state goals/u);
+    assert.match(question.instructions, /Do not reactivate it merely to reclaim foreground/u);
+  }
+  assert.match(request.questions.goal_status.criteria.not_achieved, /foreground-only change after verified activation is not failure/u);
+  // This regression checks evidence semantics; mock answers do not establish model accuracy.
+});
+
+test('keyboard layout and focused literal replacement remain closed supplied operations with the same effect gates', async () => {
+  for (const [operation, command, label] of [
+    ['set_keyboard_language', 'Переключи раскладку на английскую.', 'Установить раскладку English для выбранного окна'],
+    ['replace_text', 'Замени текст в текущем поле на «Привет».', 'Заменить всё значение уже сфокусированного поля на точный текст «Привет»'],
+  ]) {
+    const input = { command, phase: 'controls', observation: { app: 'Editor', summary: 'Selected window Normal. Focused writable ValuePattern field is observed.' }, completed: [], candidates: [{ id: 'supplied_input', label, operation, args: { secretExtra: 'PRIVATE_ARGUMENTS' } }] };
+    const request = buildWindowsChoiceRequest(input);
+    assert.equal(request.state.candidates[0].operation, operation);
+    assert.doesNotMatch(JSON.stringify(request), /PRIVATE_ARGUMENTS/u);
+    const result = payload(input, 'supplied_input');
+    result.answers.next_action = answer(Object.keys(request.questions.next_action.criteria), 'supplied_input', 0.8, 0.8);
+    assert.equal((await choose(input, result)).actionId, 'supplied_input');
+    result.answers.next_action.confidence = 0.79;
+    assert.equal((await choose(input, result)).actionId, null);
+  }
+  const request = buildWindowsChoiceRequest({ command: 'Замени текст на «тест».', observation: { app: 'Editor', summary: 'Focused writable field' }, completed: [], candidates: [{ id: 'replace', label: 'Заменить на «тест»', operation: 'replace_text' }] });
+  assert.match(request.questions.next_action.criteria.replace, /ENTIRE value.*already-focused writable ValuePattern/u);
+  assert.match(request.questions.next_action.instructions, /not keystroke typing or appending/u);
+  assert.match(request.questions.next_action.instructions, /if and only if the user explicitly names that target application/u);
+  assert.match(request.questions.next_action.instructions, /never redirect it to a different application or select an arbitrary window/u);
+  assert.match(request.questions.next_action.instructions, /For ordinary tab\/select\/invoke tasks.*only when the target surface is MINIMIZED/u);
+  assert.match(request.questions.goal_status.instructions, /Do not claim text entry verified without a successful native receipt and current matching field value/u);
 });
 
 test('UI Automation control tasks do not introduce activation for an inactive nonminimized window', () => {

@@ -3,22 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; connect-src 'none'; media-src 'self' blob:; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
   <title>Jeff — управление Windows</title>
   <link rel="stylesheet" href="lab.css">
-  <script src="lab.js" defer></script>
+  <script type="module" src="lab.js"></script>
 </head>
 <body>
   <main>
     <header><div><p class="eyebrow">РЕАЛЬНЫЙ КОМПЬЮТЕР</p><h1>Jeff — управление Windows</h1></div><span id="status" class="badge" role="status">Проверка состояния…</span></header>
     <p class="intro">Напишите задачу для компьютера. Jeff запускает поддерживаемые программы из меню «Пуск», получает доступные окна и элементы Windows, выбирает действие и проверяет результат после каждого шага. Кнопка «Стоп» прерывает выполнение; запросы, решения и результаты сохраняются в журнале.</p>
+    <section class="voice-panel" aria-labelledby="voice-title">
+      <div class="section-heading"><h2 id="voice-title">Голос</h2><span id="voice-state" class="badge" role="status">Микрофон: выкл</span></div>
+      <div class="actions"><button id="voice-wake" type="button">Ожидать Jarvis</button><button id="voice-manual" type="button">Сказать команду</button><button id="voice-finish" type="button" disabled>Закончить</button></div>
+      <p id="voice-status" class="muted" role="status" aria-live="polite">Микрофон выключен. Включите ожидание Jarvis или запишите одну команду.</p>
+      <p id="voice-transcript" class="voice-transcript" aria-live="polite">Распознанная команда появится здесь.</p>
+      <p id="voice-metrics" class="muted" hidden></p>
+      <p id="voice-warning" class="voice-warning" role="status" hidden></p>
+      <p id="voice-reminder" class="reminder-notice" role="alert" hidden></p>
+      <div class="voice-settings"><label><input id="voice-beep" type="checkbox" checked> Сигнал активации</label><label><input id="voice-reply" type="checkbox" checked> Ответ голосом Дениса</label><label><input id="voice-auto" type="checkbox" checked> Выполнять после распознавания</label></div>
+      <p class="privacy">Пауза для завершения фразы — <span id="voice-silence">2,5 с</span>. Ожидание Jarvis работает локально. После включения подождите 2–3 секунды и произнесите «Hey Jarvis». В облако отправляется только записанная команда после активации словом Jarvis или кнопкой. Если автоматическое выполнение выключено, текст останется в поле для проверки.</p>
+      <p id="voice-error" class="error" role="alert" hidden></p>
+    </section>
     <section class="controls" aria-labelledby="scenario-title">
       <h2 id="scenario-title">Задача для компьютера</h2>
-      <div class="scenario-row"><label for="scenario">Пример команды</label><select id="scenario"><option value="custom">Своя команда</option><option value="chrome">Свернуть Google Chrome</option><option value="music">Яндекс Музыка на весь экран</option><option value="steam">Открыть Steam</option><option value="tabs">Найти первую вкладку ВК</option></select><span class="threshold">Порог действия: P ≥ 0,80 · confidence ≥ 0,80</span></div>
+      <div class="scenario-row"><label for="scenario">Пример команды</label><select id="scenario"><option value="custom">Своя команда</option><option value="chrome">Свернуть Google Chrome</option><option value="music">Яндекс Музыка на весь экран</option><option value="steam">Открыть Steam</option><option value="taskmgr">Открыть диспетчер задач</option><option value="tabs">Найти первую вкладку ВК</option><option value="note">Сохранить заметку</option><option value="reminder">Напомнить через 10 минут</option><option value="question">Задать вопрос Gemini</option></select><span class="threshold">Порог действия: P ≥ 0,80 · confidence ≥ 0,80</span></div>
       <p id="goal" class="goal"></p>
       <label for="command">Что нужно сделать?</label>
       <textarea id="command" rows="3" maxlength="1024" spellcheck="false" aria-describedby="command-help privacy-help" placeholder="Сверни Google Chrome&#10;Разверни Яндекс Музыку на весь экран.&#10;Найди первую вкладку ВКонтакте в Яндекс Браузере"></textarea>
-      <div class="field-meta"><span id="command-help">Для запуска нужен ярлык в меню «Пуск», ведущий к локальному EXE без параметров. Уже открытые окна тоже доступны. Управление внутри приложения зависит от элементов, которые оно предоставляет через Windows UI Automation.</span><span id="counter">0 / 1024</span></div>
+      <div class="field-meta"><span id="command-help">Доступны поддерживаемые программы меню «Пуск» и встроенный диспетчер задач. Управление зависит от доступных UIA-элементов. Другие команды: «заметка: купить хлеб», «напомни через 10 минут проверить чай», «объясни, что такое оперативная память».</span><span id="counter">0 / 1024</span></div>
       <div class="actions"><button id="run" type="button" class="primary">Выполнить</button><button id="stop" type="button" disabled>Стоп</button><button id="start" type="button">Обновить окна</button><button id="refresh" type="button" hidden>Обновить наблюдение</button><button id="history" type="button">Журнал</button></div>
       <p id="activity" role="status" aria-live="polite">Введите задачу и нажмите «Выполнить».</p>
       <p id="privacy-help" class="privacy">Во время выполнения задача, названия доступных программ, структура окон и названия элементов передаются модели Jev. Фонового отправления наблюдений нет. Изображение экрана модель не анализирует.</p>

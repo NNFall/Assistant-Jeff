@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {readFile} from 'node:fs/promises';
-import {discoverInstalledApps,InstalledApps} from '../desktop/automation/windows-apps.mjs';
+import {discoverInstalledApps as discoverApps,InstalledApps} from '../desktop/automation/windows-apps.mjs';
 
 const player={name:'Sample Player',exe:'C:\\Program Files\\Sample\\player.exe'};
 const runnerFor=values=>async()=>({stdout:JSON.stringify(values)});
-const options=values=>({runner:runnerFor(values),realpathImpl:async exe=>exe,statImpl:async()=>({isFile:()=>true})});
+const options=values=>({platform:'test',runner:runnerFor(values),realpathImpl:async exe=>exe,statImpl:async()=>({isFile:()=>true})});
+const discoverInstalledApps=options=>discoverApps({platform:'test',...options});
 
 test('discovery uses a fixed hidden script and strips unknown fields',async()=>{
   let invocation;
@@ -138,4 +139,89 @@ test('read-only discovery rejects nonempty shortcut Arguments without storing or
   assert.doesNotMatch(script,/Start-Process|SendKeys|UIAutomation|Invoke-Expression/i);
   assert.doesNotMatch(script,/[^\x00-\x7f]/);
   assert.match(script,/\$drive\.DriveType -notin/);
+});
+
+test('Task Manager is a verified built-in even without any Start Menu links',async()=>{
+  const checks=[];
+  const apps=await discoverApps({...options([]),platform:'win32',systemRoot:'C:\\Windows',
+    realpathImpl:async exe=>{checks.push(['realpath',exe]);return exe.toLowerCase();},
+    statImpl:async exe=>{checks.push(['stat',exe]);return {isFile:()=>true};},
+  });
+  assert.equal(apps.length,1);
+  assert.deepEqual(Object.keys(apps[0]).sort(),['exe','id','name','processName']);
+  assert.equal(apps[0].exe,'C:\\Windows\\System32\\Taskmgr.exe');
+  assert.equal(apps[0].name,'Диспетчер задач (Task Manager)');
+  assert.equal(apps[0].processName,'Taskmgr');
+  assert.ok(Object.isFrozen(apps[0]));
+  assert.deepEqual(checks,[['realpath',apps[0].exe],['stat',apps[0].exe]]);
+});
+
+test('only the exact built-in path is excepted; aliases and all other system executables stay blocked',async()=>{
+  for(const systemRoot of ['C:\\Windows','D:\\OperatingSystem']){
+    const taskExe=systemRoot+'\\System32\\Taskmgr.exe';
+    const values=[
+      {name:'Arbitrary Task Alias',exe:taskExe},
+      {name:'Task Manager',exe:systemRoot+'\\SysWOW64\\Taskmgr.exe'},
+      {name:'Task Manager',exe:systemRoot+'\\System32\\Subfolder\\Taskmgr.exe'},
+      {name:'Task Manager',exe:systemRoot+'\\System32\\..\\Taskmgr.exe'},
+      {name:'Task Manager',exe:'C:\\Apps\\Taskmgr.exe'},
+      {name:'Notepad',exe:systemRoot+'\\System32\\notepad.exe'},
+      {name:'Control Panel',exe:systemRoot+'\\System32\\control.exe'},
+      {name:'Command Processor',exe:systemRoot+'\\System32\\cmd.exe'},
+      player,
+    ];
+    const apps=await discoverApps({...options(values),platform:'win32',systemRoot});
+    assert.equal(apps.length,2);
+    assert.equal(apps[0].exe,taskExe);
+    assert.equal(apps[0].name,'Диспетчер задач (Task Manager)');
+    assert.equal(apps[1].name,player.name);
+  }
+});
+
+test('missing, redirected, non-Windows or invalid-root Task Manager is not advertised',async()=>{
+  const base={...options([]),platform:'win32',systemRoot:'C:\\Windows'};
+  for(const overrides of [
+    {platform:'linux'},
+    {systemRoot:'\\\\server\\Windows'},
+    {systemRoot:'C:\\Windows\\..\\Elsewhere'},
+    {realpathImpl:async()=>{throw Object.assign(new Error('private detail'),{code:'ENOENT'});}},
+    {realpathImpl:async()=> 'C:\\Apps\\Taskmgr.exe'},
+    {statImpl:async()=>({isFile:()=>false})},
+  ])assert.deepEqual(await discoverApps({...base,...overrides}),[]);
+});
+
+test('Task Manager launch uses the canonical system executable with no arguments or shell',async()=>{
+  let invocation;
+  const catalog=new InstalledApps({...options([]),platform:'win32',systemRoot:'C:\\Windows',spawnImpl:(...args)=>{
+    invocation=args;const child=new EventEmitter();child.pid=321;child.unref=()=>{};queueMicrotask(()=>child.emit('spawn'));return child;
+  }});
+  const [app]=await catalog.list();
+  const result=await catalog.launch(app.id);
+  assert.deepEqual(invocation,['C:\\Windows\\System32\\Taskmgr.exe',[],{shell:false,detached:true,windowsHide:false,cwd:'C:\\Windows\\System32',stdio:'ignore'}]);
+  assert.equal(result.processName,'Taskmgr');
+  assert.equal(result.launched,true);
+  assert.equal(result.verified,undefined);
+});
+
+test('Task Manager is revalidated at launch and an elevation error never triggers escalation',async()=>{
+  let canonical='C:\\Windows\\System32\\Taskmgr.exe',spawns=0;
+  const catalog=new InstalledApps({...options([]),platform:'win32',systemRoot:'C:\\Windows',realpathImpl:async()=>canonical,spawnImpl:()=>{
+    spawns++;const child=new EventEmitter();child.unref=()=>{};
+    queueMicrotask(()=>child.emit('error',Object.assign(new Error('private command'),{errno:740})));
+    return child;
+  }});
+  const [app]=await catalog.list();
+  canonical='C:\\Windows\\SysWOW64\\Taskmgr.exe';
+  await assert.rejects(catalog.launch(app.id),{code:'APP_TARGET_CHANGED'});
+  assert.equal(spawns,0);
+  canonical='C:\\Windows\\System32\\Taskmgr.exe';
+  await assert.rejects(catalog.launch(app.id),{code:'APP_ELEVATION_REQUIRED',message:'APP_ELEVATION_REQUIRED'});
+  assert.equal(spawns,1);
+});
+
+test('cancellation during built-in existence checks stops discovery',async()=>{
+  const abort=new AbortController();
+  await assert.rejects(discoverApps({...options([]),platform:'win32',systemRoot:'C:\\Windows',signal:abort.signal,
+    realpathImpl:async exe=>{abort.abort();return exe;},
+  }),{code:'ABORTED'});
 });
