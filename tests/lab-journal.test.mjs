@@ -13,6 +13,16 @@ async function workspace(t) {
 }
 const readEvents=async run=>(await readFile(run.eventPath,'utf8')).trim().split('\n').map(JSON.parse);
 
+test('facade and child journals appear as one task while child remains readable',async t=>{
+  const directory=await workspace(t),parent=await RunJournal.create('Одна задача',{directory}),child=await RunJournal.create('Одна задача',{directory});
+  const running=await listRuns({directory,activeRunIds:[parent.runId,child.runId],excludeRunIds:[child.runId]});
+  assert.deepEqual(running.runs.map(run=>run.runId),[parent.runId]);assert.equal(running.runs[0].status,'running');
+  assert.equal((await readRun(child.runId,{directory,activeRunIds:[child.runId]})).status,'running');
+  await child.finish({ok:true,reason:'goal_model_assessed'});await parent.finish({ok:true,reason:'goal_model_assessed',childRunId:child.runId});
+  const finished=await listRuns({directory});assert.deepEqual(finished.runs.map(run=>run.runId),[parent.runId]);
+  assert.equal((await readRun(child.runId,{directory})).status,'finished');
+});
+
 test('semantic parent and desktop child both remain running while unrelated abandoned runs are interrupted',async t=>{
   const directory=await workspace(t);
   const parent=await RunJournal.create('parent',{directory});

@@ -9,11 +9,20 @@ using System.Threading;
 internal static class SystemVolume
 {
     private const double VerificationTolerancePercent = 0.05;
+    private const uint DeviceStateActive = 1;
+    private const int MaxOutputNameLength = 256;
+    private const int EndpointNotFound = unchecked((int)0x80070490);
+    private static readonly PropertyKey DeviceFriendlyName = new PropertyKey(new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), 14);
     private static readonly Guid VolumeInterface = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
     private static readonly Guid EventContext = new Guid("E8180AD2-5D49-483F-9451-61E22E09BA17");
 
     public static object Execute(string method, Dictionary<string, object> args)
     {
+        if (method == "audio_outputs_get")
+        {
+            if (args == null || args.Count != 0) throw new DesktopError("INVALID_ARGUMENT", false);
+            return ReadAudioOutputs();
+        }
         double? requested = null;
         if (method == "volume_get")
         {
@@ -69,6 +78,101 @@ internal static class SystemVolume
         finally { Release(volume); Release(device); Release(enumerator); }
     }
 
+    // Independent readback for Windows UI actions. This path never activates a
+    // volume/session interface or writes endpoint properties/default policies.
+    private static object ReadAudioOutputs()
+    {
+        IMMDeviceEnumerator enumerator = null; IMMDeviceCollection collection = null;
+        string stage = "audio_outputs_enumerate";
+        try
+        {
+            enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+            string defaultId = ReadDefaultOutputId(enumerator);
+            Check(enumerator.EnumAudioEndpoints(0, DeviceStateActive, out collection)); // eRender only.
+            uint count; Check(collection.GetCount(out count));
+            var devices = new List<object>(); bool defaultFound = defaultId == null;
+            for (uint index = 0; index < count; index++)
+            {
+                IMMDevice device = null;
+                try
+                {
+                    stage = "audio_outputs_device";
+                    Check(collection.Item(index, out device));
+                    uint state; Check(device.GetState(out state));
+                    if (state != DeviceStateActive) throw new InvalidOperationException("AUDIO_OUTPUTS_CHANGED");
+                    string id; Check(device.GetId(out id));
+                    if (String.IsNullOrEmpty(id)) throw new InvalidOperationException("INVALID_AUDIO_OUTPUT_ID");
+                    bool isDefault = String.Equals(id, defaultId, StringComparison.Ordinal);
+                    defaultFound |= isDefault;
+                    stage = "audio_outputs_name";
+                    string name = ReadOutputName(device);
+                    devices.Add(new { id = EndpointHash(id), name = name, active = true, isDefault = isDefault });
+                }
+                finally { Release(device); }
+            }
+            stage = "audio_outputs_verify_default";
+            if (!defaultFound || !String.Equals(defaultId, ReadDefaultOutputId(enumerator), StringComparison.Ordinal))
+                throw new InvalidOperationException("AUDIO_OUTPUTS_CHANGED");
+            return new { provider = "windows_coreaudio", endpointRole = "multimedia", devices = devices,
+                defaultDeviceId = defaultId == null ? null : EndpointHash(defaultId), verified = true,
+                effectAttempted = false, evidence = "audio_outputs_read" };
+        }
+        catch (Exception error) { throw new DesktopError("SYSTEM_AUDIO_OUTPUTS_FAILED", stage, error, false); }
+        finally { Release(collection); Release(enumerator); }
+    }
+    private static string ReadDefaultOutputId(IMMDeviceEnumerator enumerator)
+    {
+        IMMDevice device = null;
+        try
+        {
+            int result = enumerator.GetDefaultAudioEndpoint(0, 1, out device); // eRender, eMultimedia.
+            if (result == EndpointNotFound) return null;
+            Check(result);
+            string id; Check(device.GetId(out id));
+            if (String.IsNullOrEmpty(id)) throw new InvalidOperationException("INVALID_AUDIO_OUTPUT_ID");
+            return id;
+        }
+        finally { Release(device); }
+    }
+    private static string ReadOutputName(IMMDevice device)
+    {
+        IPropertyStore properties = null; PropVariant value = new PropVariant();
+        try
+        {
+            Check(device.OpenPropertyStore(0, out properties)); // STGM_READ.
+            PropertyKey key = DeviceFriendlyName;
+            Check(properties.GetValue(ref key, ref value));
+            if (value.VariantType != 31 || value.Pointer == IntPtr.Zero) // VT_LPWSTR.
+                throw new InvalidOperationException("AUDIO_OUTPUT_NAME_UNAVAILABLE");
+            return BoundOutputName(Marshal.PtrToStringUni(value.Pointer));
+        }
+        finally { PropVariantClear(ref value); Release(properties); }
+    }
+    private static string BoundOutputName(string value)
+    {
+        var name = new StringBuilder();
+        for (int index = 0; value != null && index < value.Length && name.Length < MaxOutputNameLength; index++)
+        {
+            char character = value[index];
+            if (Char.IsControl(character) || Char.IsWhiteSpace(character))
+            {
+                if (name.Length > 0 && name[name.Length - 1] != ' ') name.Append(' ');
+            }
+            else if (Char.IsHighSurrogate(character))
+            {
+                if (index + 1 < value.Length && Char.IsLowSurrogate(value[index + 1]))
+                {
+                    if (name.Length + 2 > MaxOutputNameLength) break;
+                    name.Append(character); name.Append(value[++index]);
+                }
+            }
+            else if (!Char.IsLowSurrogate(character)) name.Append(character);
+        }
+        string result = name.ToString().Trim();
+        if (result.Length == 0) throw new InvalidOperationException("AUDIO_OUTPUT_NAME_UNAVAILABLE");
+        return result;
+    }
+
     private static object Receipt(string operation, double? requested, object before, object after, bool verified, bool attempted, string evidence, string stage, string providerCode)
     {
         return new { operation = operation, provider = "windows_coreaudio", endpointRole = "multimedia", requestedPercent = requested,
@@ -98,7 +202,7 @@ internal static class SystemVolume
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDeviceEnumerator
     {
-        [PreserveSig] int EnumAudioEndpoints(int flow, uint mask, out IntPtr devices);
+        [PreserveSig] int EnumAudioEndpoints(int flow, uint mask, out IMMDeviceCollection devices);
         [PreserveSig] int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice device);
         [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
         [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr callback);
@@ -108,10 +212,41 @@ internal static class SystemVolume
     private interface IMMDevice
     {
         [PreserveSig] int Activate(ref Guid iid, uint context, IntPtr parameters, [MarshalAs(UnmanagedType.IUnknown)] out object result);
-        [PreserveSig] int OpenPropertyStore(uint access, out IntPtr properties);
+        [PreserveSig] int OpenPropertyStore(uint access, out IPropertyStore properties);
         [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
         [PreserveSig] int GetState(out uint state);
     }
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDeviceCollection
+    {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int Item(uint index, out IMMDevice device);
+    }
+    // These are the first three native IPropertyStore slots. Do not expose its
+    // trailing SetValue/Commit methods: endpoint property access is read-only.
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPropertyStore
+    {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int GetAt(uint index, out PropertyKey key);
+        [PreserveSig] int GetValue(ref PropertyKey key, ref PropVariant value);
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PropertyKey
+    {
+        public Guid FormatId; public uint PropertyId;
+        public PropertyKey(Guid formatId, uint propertyId) { FormatId = formatId; PropertyId = propertyId; }
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PropVariant
+    {
+        public ushort VariantType; private ushort Reserved1, Reserved2, Reserved3;
+        public IntPtr Pointer; private IntPtr UnionTail;
+        // Full native union storage: 24 bytes on x64, 16 on x86. A pointer-only
+        // definition is too small when IPropertyStore writes the PROPVARIANT.
+    }
+    [DllImport("ole32.dll", ExactSpelling = true)]
+    private static extern int PropVariantClear(ref PropVariant value);
     // Keep native vtable order, including unused slots before the methods used here.
     [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IAudioEndpointVolume

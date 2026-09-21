@@ -1,7 +1,7 @@
 // Backward-compatible entry point for the former semantic-router UI smoke.
-// Production now uses AgentCommands. Delegate to the real main/preload/renderer
-// agent harness so both commands run the same 10 gates and safety boundaries.
+// Production now uses the Jev facade. Delegate to the real main/preload/renderer
+// harness so both commands run the same Jev/CRUD gates and isolated boundaries.
 // Arguments are preserved, including mandatory --mock-only and optional --screenshots.
 // Run: electron.cmd scripts/test-friendly-ui.mjs --mock-only [--screenshots]
-console.log('test-friendly-ui: запуск нового test-agent-ui.mjs (AgentCommands), 10 проверок; параметры передаются без изменений.');
+console.log('test-friendly-ui: запуск test-agent-ui.mjs (Jev и Gemini), изолированные проверки; параметры передаются без изменений.');
 await import('./test-agent-ui.mjs');

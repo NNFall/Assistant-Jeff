@@ -1,10 +1,10 @@
 import {createHash} from 'node:crypto';
 
-export const WINDOWS_OPERATIONS=new Set(['inspect','activate','minimize','maximize','restore','close','select','invoke','toggle','expand','collapse','set_keyboard_language','replace_text']);
+export const WINDOWS_OPERATIONS=new Set(['inspect','activate','minimize','maximize','restore','close','select','invoke','click','toggle','expand','collapse','set_keyboard_language','replace_text']);
 const fail=()=>Object.assign(new Error('WINDOWS_INVALID_SNAPSHOT'),{code:'WINDOWS_INVALID_SNAPSHOT'});
 const riskyLabel=/(?:\b(?:delete|erase|remove|send|submit|pay|purchase|buy|install|password|sign.?in|log.?in|security|permission|format|reset|subscribe)\b|удал|стереть|отправ|оплат|купить|установить|парол|войти|безопасност|разрешени|форматир|сброс|подписат)/iu;
 const exactAuthLabel=/^\s*вход[.!…]?\s*$/iu;
-const verbs={inspect:'Прочитать элементы окна',activate:'Открыть / показать окно на переднем плане',minimize:'Свернуть окно',maximize:'Развернуть окно на весь экран',restore:'Восстановить обычный размер окна',close:'Закрыть окно',select:'Выбрать элемент',invoke:'Нажать кнопку',toggle:'Переключить состояние',expand:'Раскрыть',collapse:'Свернуть список'};
+const verbs={inspect:'Прочитать элементы окна',activate:'Открыть / показать окно на переднем плане',minimize:'Свернуть окно',maximize:'Развернуть окно на весь экран',restore:'Восстановить обычный размер окна',close:'Закрыть окно',select:'Выбрать элемент',invoke:'Нажать кнопку',click:'Нажать видимую кнопку',toggle:'Переключить состояние',expand:'Раскрыть',collapse:'Свернуть список'};
 const digest=value=>createHash('sha256').update(value).digest('hex').slice(0,24);
 const pureWindowOperations=new Set(['activate','minimize','maximize','restore','close']);
 export function validateWindowScope(scope){
@@ -36,7 +36,7 @@ export function validateWindowsSnapshot(value){
 }
 
 /** Hierarchical access: choose a window, then its observed operations/controls. */
-export function buildWindowsCandidates(snapshot,command,{page=0,apps=[],scope}={}){
+export function buildWindowsCandidates(snapshot,command,{page=0,apps=[],scope,limit=96}={}){
   validateWindowsSnapshot(snapshot);
   const windowScope=validateWindowScope(scope);
   const windowIds=new Set(snapshot.windows.map(w=>w.id));
@@ -80,7 +80,8 @@ export function buildWindowsCandidates(snapshot,command,{page=0,apps=[],scope}={
   // in a scoped request. Only additional app/control candidates are paginated.
   const windows=actions.filter(a=>a.isWindow&&(windowScope||a.operation==='inspect'));
   const rest=actions.filter(a=>!(a.isWindow&&(windowScope||a.operation==='inspect'))).sort((a,b)=>b.score-a.score||a.id.localeCompare(b.id));
-  const slots=Math.max(1,96-windows.length);
+  const maximum=Number.isSafeInteger(limit)?Math.max(65,Math.min(96,limit)):96;
+  const slots=Math.max(1,maximum-windows.length);
   const pages=Math.max(1,Math.ceil(rest.length/slots));
   const index=Math.max(0,Math.min(pages-1,Number.isSafeInteger(page)?page:0));
   const candidates=[...windows,...rest.slice(index*slots,(index+1)*slots)].map(({score,isWindow,...a})=>a);

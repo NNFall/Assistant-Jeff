@@ -7,11 +7,10 @@ import {WindowsDesktop} from '../windows-desktop/controller.mjs';
 import {WindowsBridge} from '../windows-desktop/bridge.mjs';
 import {InstalledApps} from '../../desktop/automation/windows-apps.mjs';
 import {AgentCommands} from '../../desktop/agent/commands.mjs';
+import {JevAssistant} from '../../desktop/agent/jev-assistant.mjs';
+import {JevCommands} from '../../desktop/agent/jev-commands.mjs';
+import {createJevDesktopSession} from '../../desktop/agent/jev-desktop-session.mjs';
 import {createDataTools} from '../../desktop/agent/data-tools.mjs';
-import {createWindowsTools} from '../../desktop/agent/windows-tools.mjs';
-import {createWinAppTools} from '../../desktop/agent/winapp-tools.mjs';
-import {createTextTools} from '../../desktop/agent/text-tools.mjs';
-import {createAgentSystemTools} from '../../desktop/agent/system-tools.mjs';
 import {createSystemTools} from '../../desktop/automation/system-tools.mjs';
 import {Store} from '../../desktop/core/index.mjs';
 import {readProtected} from '../../desktop/secrets.mjs';
@@ -77,10 +76,14 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
       const after={minimized:!!window&&!window.isDestroyed()&&window.isMinimized()};
       return {verified:after.minimized,effectAttempted:!before.minimized,before,after};
     }});
-    commands=new AgentCommands({progress,directory:paths.logs,
+    // Jev owns every desktop choice. Gemini's separate data assistant cannot
+    // call a Windows executor, even if a model returns a desktop tool name.
+    const dataCommands=new AgentCommands({progress,directory:paths.logs,
       modelStep:(payload,options)=>gateway.agentStep(payload,options),
-      createTools:()=>[...createDataTools({store}),...createWindowsTools({desktop:lab}),...createTextTools({desktop:lab}),...createAgentSystemTools({systemTools}),
-        ...createWinAppTools({executable:paths.winapp}).map(tool=>({...tool,available:fs.existsSync(paths.winapp),reason:fs.existsSync(paths.winapp)?undefined:'Компонент управления Windows не установлен.'}))]});
+      createTools:()=>createDataTools({store})});
+    const desktopCommands=new JevCommands({progress,directory:paths.logs,apiKeyResolver:lab.apiKeyResolver,
+      createSession:({command})=>createJevDesktopSession({desktop:lab,systemTools,command})});
+    commands=new JevAssistant({progress,directory:paths.logs,apiKeyResolver:lab.apiKeyResolver,desktopCommands,dataCommands});
     voice=new VoiceSession({paths,encoder:new Mp3Encoder({executablePath:paths.ffmpeg}),gateway,
       denis:new DenisVoice({executablePath:paths.piper,modelPath:paths.denis}),commands,getSettings:()=>settings,emit:voiceEvent});
     window=new BrowserWindow({width:1100,height:800,minWidth:760,minHeight:620,title:'Assistant Jeff',icon:path.join(root,'desktop','assets','icon.png'),
@@ -95,10 +98,10 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
       capabilities:()=>commands.capabilities(),
       clearContext:()=>commands.clearContext(),
       stop:()=>{commands.stop();return voice.stop();},
-      history:()=>listRuns({directory:paths.logs,activeRunIds:[commands.activeRunId,lab.activeRunId].filter(Boolean)}),
-      readRun:payload=>readRun(payload?.runId,{directory:paths.logs,activeRunIds:[commands.activeRunId,lab.activeRunId].filter(Boolean)}),
+      history:()=>listRuns({directory:paths.logs,activeRunIds:[commands.activeRunId,desktopCommands.activeRunId,dataCommands.activeRunId,lab.activeRunId].filter(Boolean),excludeRunIds:[desktopCommands.activeRunId,dataCommands.activeRunId].filter(Boolean)}),
+      readRun:payload=>readRun(payload?.runId,{directory:paths.logs,activeRunIds:[commands.activeRunId,desktopCommands.activeRunId,dataCommands.activeRunId,lab.activeRunId].filter(Boolean)}),
       openLogs:async()=>{fs.mkdirSync(paths.logs,{recursive:true});const error=await shell.openPath(paths.logs);return error?{error:'LOG_DIRECTORY_OPEN_FAILED'}:{opened:true};},
-      voiceStatus:async()=>({...await voice.status(),version:app.getVersion()}),voiceStart:async payload=>{const result=await voice.start(payload);allowCapture=result.ok===true;return result;},
+      voiceStatus:async()=>{const status=await voice.status();let jev=false;try{jev=Boolean(await lab.apiKeyResolver());}catch{}return {...status,providers:{...status.providers,jev},version:app.getVersion()};},voiceStart:async payload=>{const result=await voice.start(payload);allowCapture=result.ok===true;return result;},
       voiceStop:()=>{allowCapture=false;return voice.stop();},voiceActivate:()=>voice.activate(),voiceFinish:()=>voice.finish(),
       voiceSettings:patch=>{settings=saveVoiceSettings(paths,patch,settings);return {ok:true,settings};},speechEnded:payload=>voice.speechEnded(payload),
       dismissReminder:payload=>{if(!Number.isSafeInteger(payload?.id)||payload.id<=0)throw Object.assign(new Error(),{code:'INVALID_REMINDER_ID'});store.completeReminder(payload.id);return {ok:true,id:payload.id};}}))register(name,handler);

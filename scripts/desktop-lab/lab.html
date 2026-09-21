@@ -44,6 +44,7 @@
   <main class="app-main">
     <section id="view-assistant" class="view" aria-labelledby="hero-title">
       <div class="page-heading"><div class="heading-with-actions"><div><h1 id="hero-title">Что нужно сделать?</h1><p id="hero-subtitle">Скажите или напишите задачу. Ход выполнения появится здесь.</p></div><button id="new-conversation" type="button" class="button quiet small">Новый разговор</button></div></div>
+      <ul class="provider-roles" aria-label="Роли моделей"><li>Управление Windows — <strong>Jev</strong></li><li>Распознавание речи — <strong>Gemini</strong></li><li>Заметки, напоминания и ответы — <strong>Gemini</strong></li></ul>
       <section class="composer" aria-label="Новая задача">
         <label class="sr-only" for="command">Задача для Jeff</label>
         <textarea id="command" rows="3" maxlength="1024" spellcheck="false" placeholder="Например, открой диспетчер задач" aria-describedby="command-help counter"></textarea>
@@ -73,6 +74,8 @@
       <section id="task-card" class="task-card" data-tone="neutral" aria-labelledby="result-title" hidden>
         <div class="task-heading"><span id="task-state" class="task-state">Задача</span><span id="task-time" class="caption"></span></div>
         <p id="task-command" class="task-command"></p>
+        <p id="task-provider" class="task-provider" aria-live="polite"></p>
+        <p id="task-decision" class="task-decision" hidden></p>
         <div class="task-result"><span class="result-mark" aria-hidden="true"></span><div class="result-copy"><h2 id="result-title">Готовлю задачу</h2><p id="activity" class="activity" role="status" aria-live="polite"></p><p id="result-message" class="result-message"></p></div></div>
         <ol id="activity-list" class="activity-list" aria-label="Ход выполнения"></ol>
         <div id="result-actions" class="result-actions"><button id="edit-command" type="button" class="button secondary small"><svg class="icon" aria-hidden="true"><use href="#icon-edit"/></svg>Изменить задачу</button><button id="show-details" type="button" class="button quiet small"><svg class="icon" aria-hidden="true"><use href="#icon-info"/></svg>Подробнее</button></div>
@@ -98,8 +101,8 @@
         <label class="setting-row" for="voice-auto"><span><strong>Выполнять после распознавания</strong><span class="setting-description">Если выключить, команда останется в поле — её можно проверить и изменить.</span></span><input id="voice-auto" type="checkbox" checked></label>
         <p class="setting-note">Запись завершается после <span id="voice-silence">2 с</span> тишины. Для голосовой активации нажмите «Включить Jarvis» и произнесите «Hey Jarvis».</p>
       </section>
-      <section class="settings-card" aria-labelledby="providers-title"><h2 id="providers-title">Компоненты</h2><dl class="provider-list"><div><dt><strong>Gemini</strong><span>Распознавание речи и ответы на вопросы</span></dt><dd id="provider-gemini" data-tone="neutral">Проверка…</dd></div><div><dt><strong>Денис</strong><span>Голосовой ответ на компьютере</span></dt><dd id="provider-denis" data-tone="neutral">Проверка…</dd></div><div><dt><strong>Hey Jarvis</strong><span>Локальное распознавание имени</span></dt><dd id="provider-wake" data-tone="neutral">Проверка…</dd></div></dl></section>
-      <section class="privacy-card" aria-labelledby="privacy-title"><svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg><div><h2 id="privacy-title">Когда используются данные</h2><p>Ожидание имени работает локально. Только после активации речь отправляется в Gemini: по мере записи или после её завершения, в зависимости от выбранного режима. Текст задачи передаётся TypeSafe для выбора действия, а при управлении Windows — также названия доступных окон и элементов. Изображение экрана не отправляется.</p></div></section>
+      <section class="settings-card" aria-labelledby="providers-title"><h2 id="providers-title">Компоненты</h2><dl class="provider-list"><div><dt><strong>Jev</strong><span>Выбор исполнителя и управление Windows</span></dt><dd id="provider-jev" data-tone="neutral">Проверка…</dd></div><div><dt><strong>Gemini</strong><span>Распознавание речи, заметки, напоминания и ответы</span></dt><dd id="provider-gemini" data-tone="neutral">Проверка…</dd></div><div><dt><strong>Денис</strong><span>Голосовой ответ на компьютере</span></dt><dd id="provider-denis" data-tone="neutral">Проверка…</dd></div><div><dt><strong>Hey Jarvis</strong><span>Локальное распознавание имени</span></dt><dd id="provider-wake" data-tone="neutral">Проверка…</dd></div></dl></section>
+      <section class="privacy-card" aria-labelledby="privacy-title"><svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg><div><h2 id="privacy-title">Когда используются данные</h2><p>Ожидание имени работает локально. Только после активации речь отправляется в Gemini: по мере записи или после её завершения. Jev получает текст задачи для выбора исполнителя, а при управлении Windows — названия доступных окон, элементов и результаты шагов. Для заметок, напоминаний и ответов Gemini получает текст запроса, контекст разговора и нужные записи. Изображение экрана не отправляется.</p></div></section>
       <p id="version-label" class="version-label">Assistant Jeff</p>
     </section>
   </main>
@@ -112,6 +115,8 @@
     <section id="readable-log" class="readable-log" aria-labelledby="readable-log-title" hidden>
       <h3 id="readable-log-title" class="readable-log-title">Понятный журнал выполнения</h3>
       <p id="readable-log-intro" class="readable-log-intro">Здесь показаны выбранные варианты, вероятность выбора и уверенность модели отдельно. Идентификаторы вариантов оставлены только в технических данных ниже.</p>
+      <p id="detail-provider" class="task-provider"></p>
+      <section id="goal-verification-panel" class="log-panel" aria-labelledby="goal-verification-title" hidden><h4 id="goal-verification-title"></h4><p id="goal-verification-message" class="log-detail"></p></section>
       <section id="data-sent-panel" class="log-panel" aria-labelledby="data-sent-title"><h4 id="data-sent-title">Какие данные передавались</h4><ul id="data-sent-list" class="log-facts"></ul></section>
       <section id="capability-panel" class="log-panel" aria-labelledby="capability-title" hidden><h4 id="capability-title">Возможности в этом отчёте</h4><p id="capability-context" class="caption" hidden></p><ul id="capability-list" class="capability-list"></ul></section>
       <section id="decision-panel" class="log-panel" aria-labelledby="decision-title"><h4 id="decision-title">Решения по шагам</h4><ol id="decision-steps" class="decision-steps"></ol><p id="decision-empty" class="log-empty" hidden>Решения модели не записаны.</p></section>

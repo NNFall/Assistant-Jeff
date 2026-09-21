@@ -1,6 +1,6 @@
 {
   "name": "assistant-jeff",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Личный голосовой помощник для Windows",
   "private": true,
   "type": "module",
@@ -54,7 +54,12 @@
       {
         "from": "work/winapp-runtime",
         "to": "winapp-runtime",
-        "filter": ["winapp.exe", "libSkiaSharp.dll", "runtime-manifest.json", "licenses/**/*"]
+        "filter": [
+          "winapp.exe",
+          "libSkiaSharp.dll",
+          "runtime-manifest.json",
+          "licenses/**/*"
+        ]
       },
       {
         "from": "models",

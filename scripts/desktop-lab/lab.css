@@ -65,6 +65,8 @@ button .icon, a .icon { flex: 0 0 auto; }
 h1 { font-size: 29px; line-height: 1.25; font-weight: 650; letter-spacing: -.6px; }
 .page-heading > p, .page-heading > div > p { color: var(--muted); margin-top: 8px; line-height: 1.5; }
 .heading-with-actions { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.provider-roles { display: flex; flex-wrap: wrap; gap: 5px 18px; list-style: none; margin: -7px 0 18px; padding: 0; color: #616f84; font-size: 12px; line-height: 1.6; }
+.provider-roles strong { color: #3e536f; font-weight: 600; }
 .composer { background: #fff; border: 1px solid #d7dfec; border-radius: 15px; box-shadow: 0 4px 18px #25314904; overflow: hidden; transition: border-color 140ms, box-shadow 140ms; }
 .composer:focus-within { border-color: #99b2f7; box-shadow: 0 0 0 3px #315bdc0a; }
 #command { display: block; width: 100%; min-height: 95px; max-height: 240px; padding: 19px 21px 5px; border: 0; resize: vertical; background: transparent; color: #26334c; font-size: 17px; line-height: 1.55; }
@@ -137,6 +139,12 @@ h1 { font-size: 29px; line-height: 1.25; font-weight: 650; letter-spacing: -.6px
 .task-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 8px; }
 .task-state { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; font-weight: 650; color: #616f84; }
 .task-command { color: #616f84; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; margin-bottom: 17px; }
+.task-provider { color: #3e536f; font-size: 12px; line-height: 1.5; font-weight: 600; margin-bottom: 8px; }
+.task-provider:empty { display: none; }
+.task-decision { color: #65748c; font-size: 12px; line-height: 1.6; margin-bottom: 15px; overflow-wrap: anywhere; }
+.model-payload { margin-top: 10px; }
+.model-payload summary { color: #526786; font-size: 12px; cursor: pointer; }
+.model-payload pre { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; padding: 10px; background: #f0f3f8; border-radius: 7px; }
 .task-result { display: flex; align-items: flex-start; gap: 13px; }
 .result-mark { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 35px; height: 35px; border-radius: 50%; color: #5274c6; background: #e9effb; font-size: 19px; font-weight: 500; }
 .result-mark::after { content: "·"; }

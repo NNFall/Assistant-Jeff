@@ -20,6 +20,7 @@ const MAX_TEXT = 1800;
 
 const QUESTION_TITLES = Object.freeze({
   next_action: 'Следующее действие',
+  next_step: 'Следующее действие',
   request_kind: 'Тип запроса',
   requested_fields: 'Запрошенные поля',
   desired_tab: 'Целевая вкладка',
@@ -38,7 +39,8 @@ const CHOICE_LABELS = Object.freeze({
   reset: 'Сбросить',
   no_action: 'Не выполнять действие',
   unsupported: 'Действие недоступно',
-  done: 'Завершить: цель достигнута по наблюдению',
+  unavailable: 'Подходящее действие недоступно',
+  done: 'Завершить по оценке Jev',
   no_request: 'Нет подтверждённого запроса на действие',
   keep: 'Оставить как есть',
   on: 'Включить',
@@ -48,6 +50,8 @@ const CHOICE_LABELS = Object.freeze({
   open_app: 'Открыть приложение',
   chat: 'Ответить текстом',
   desktop: 'Управление окном или элементом',
+  memory: 'Заметки и напоминания — Gemini',
+  conversation: 'Ответ на вопрос — Gemini',
   system_volume: 'Изменить громкость',
   self_minimize: 'Свернуть Jeff',
 });
@@ -107,6 +111,7 @@ const TOOL_LABELS = Object.freeze({
 
 const STATUS_LABELS = Object.freeze({
   verified: 'Подтверждено',
+  already_satisfied: 'Уже в нужном состоянии',
   executed: 'Выполнено',
   failed: 'Не выполнено',
   pending_verification: 'Действие отправлено, проверяю результат',
@@ -263,16 +268,50 @@ function stripOperationPrefix(value) {
   const source = string(value);
   return source.replace(/^(?:activate|click|close|collapse|expand|inspect|invoke|launch|maximize|minimize|press_key|replace_text|restore|select|set_keyboard_language|toggle)\s*:\s*/iu, '').trim();
 }
+function requestCandidates(request) {
+  const state = object(request?.state);
+  return [...array(state.candidates), ...array(state.actions), ...array(state.availableActions)].slice(0, MAX_CONTROLS);
+}
+function eventDecision(event) {
+  if (event?.decision && typeof event.decision === 'object') return event.decision;
+  return Object.fromEntries(['choice', 'actionId', 'route', 'probability', 'confidence', 'probabilities', 'model', 'latencyMs', 'usage', 'label', 'decisions']
+    .filter(key => event?.[key] !== undefined).map(key => [key, event[key]]));
+}
+function decisionCalls(report) {
+  const recorded = boundedArray(report?.calls, MAX_CALLS).filter(call => Object.keys(object(call?.request?.questions)).length || call?.decision?.choice !== undefined || call?.decision?.actionId !== undefined || call?.decision?.route !== undefined);
+  if (recorded.length) return recorded;
+  const calls = [];
+  const pending = new Map();
+  for (const event of eventList(report)) {
+    const kind = String(event.phase ?? '').startsWith('route_') ? 'route' : 'action';
+    if (!['route_request', 'route_response', 'route_decision', 'model_request', 'model_response', 'model_decision'].includes(event.phase)) continue;
+    const key = `${event.sourceRunId ?? event.runId ?? ''}:${kind}:${event.step ?? ''}`;
+    let call = pending.get(key);
+    if (event.phase.endsWith('_request') || !call) {
+      call = {kind, provider: event.provider ?? 'jev', step: event.step};
+      calls.push(call); pending.set(key, call);
+    }
+    if (event.request) call.request = event.request;
+    if (event.response) call.response = event.response;
+    if (event.phase.endsWith('_decision')) call.decision = eventDecision(event);
+    if (event.label) call.label = event.label;
+  }
+  const routing = object(report?.routing);
+  if (!calls.some(call => call.kind === 'route') && routing.request) {
+    calls.unshift({kind: 'route', provider: routing.provider ?? 'jev', request: routing.request, response: routing.response, decision: routing.decision ?? routing});
+  }
+  return calls.slice(0, MAX_CALLS);
+}
 function candidateMaps(report) {
   const byId = new Map();
-  for (const call of boundedArray(report?.calls, MAX_CALLS)) {
-    for (const candidate of boundedArray(call?.request?.state?.candidates, MAX_CONTROLS)) {
+  for (const call of decisionCalls(report)) {
+    for (const candidate of requestCandidates(call?.request)) {
       if (!candidate || typeof candidate.id !== 'string' || byId.has(candidate.id)) continue;
       const label = string(candidate.label);
       if (label) byId.set(candidate.id, { id: candidate.id, label, operation: candidate.operation });
     }
   }
-  for (const event of boundedArray(report?.trace ?? report?.events, MAX_STEPS * 8)) {
+  for (const event of eventList(report)) {
     const candidate = object(event?.candidate);
     if (typeof candidate.id !== 'string' || byId.has(candidate.id)) continue;
     const label = string(candidate.label);
@@ -289,17 +328,19 @@ function criteriaFor(request, questionKey) {
 /** Resolve a model option to a readable label without making the id primary. */
 export function humanChoice(choice, { request, questionKey = 'next_action', candidates } = {}) {
   const id = typeof choice === 'string' ? choice : '';
-  const candidate = candidates?.get?.(id) ?? boundedArray(request?.state?.candidates, MAX_CONTROLS).find(item => item?.id === id);
+  if (id === 'done' || id === 'unavailable') return CHOICE_LABELS[id];
+  if (questionKey === 'route' && ['desktop', 'memory', 'conversation'].includes(id)) return id === 'desktop' ? 'Управление Windows — Jev' : CHOICE_LABELS[id];
+  const candidate = requestCandidates(request).find(item => item?.id === id) ?? candidates?.get?.(id);
   if (candidate?.label) return string(candidate.label);
   const criterion = criteriaFor(request, questionKey)[id];
-  if (criterion) return stripOperationPrefix(criterion);
+  if (criterion) return stripOperationPrefix(typeof criterion === 'string' ? criterion : criterion.label ?? criterion.description) || titleCaseChoice(id);
   return titleCaseChoice(id);
 }
 
 function answerForCall(call, questionKey) {
   const direct = object(call?.decision?.decisions?.[questionKey]);
   if (Object.keys(direct).length) return direct;
-  if (questionKey === 'next_action' && call?.decision && (call.decision.choice !== undefined || call.decision.actionId !== undefined)) return call.decision;
+  if (call?.decision && (call.decision.choice !== undefined || call.decision.actionId !== undefined || call.decision.route !== undefined)) return call.decision;
   const response = object(call?.response?.answers?.[questionKey]);
   if (Object.keys(response).length) return response;
   return {};
@@ -308,7 +349,7 @@ function answerForCall(call, questionKey) {
 function callQuestionEntries(call) {
   const requestQuestions = object(call?.request?.questions);
   const keys = Object.keys(requestQuestions);
-  if (!keys.length && call?.decision && (call.decision.choice !== undefined || call.decision.actionId !== undefined)) return ['next_action'];
+  if (!keys.length && call?.decision && (call.decision.choice !== undefined || call.decision.actionId !== undefined || call.decision.route !== undefined)) return [call.kind === 'route' ? 'route' : 'next_action'];
   return keys;
 }
 
@@ -332,10 +373,13 @@ function requestData(request) {
   if (state.observation && typeof state.observation === 'object') {
     const observation = object(state.observation);
     const value = [string(observation.app, 120), string(observation.summary, 900)].filter(Boolean).join('. ');
-    fields.push({ label: 'Наблюдение интерфейса', value: value || 'Описание наблюдения передано без подробностей.' });
+    const compact = Array.isArray(observation.windows) ? `Окон: ${observation.windows.length}; элементов: ${array(observation.controls).length}.${observation.inspected?.title ? ' Текущее окно: ' + string(observation.inspected.title, 200) + '.' : ''}` : '';
+    fields.push({ label: 'Наблюдение интерфейса', value: value || compact || 'Описание наблюдения передано без подробностей.' });
   }
-  if (Array.isArray(state.candidates)) fields.push({ label: 'Доступные варианты', value: `${state.candidates.length} наблюдаемых вариантов действия.` });
+  const candidates = requestCandidates(request);
+  if (candidates.length) fields.push({ label: 'Доступные варианты', value: `${candidates.length} наблюдаемых вариантов действия.` });
   if (Array.isArray(state.completed)) fields.push({ label: 'Предыдущие шаги', value: state.completed.length ? `${state.completed.length} ранее записанных шагов.` : 'Ранее выполненных шагов нет.' });
+  if (Array.isArray(state.recentSteps)) fields.push({ label: 'Последние шаги', value: state.recentSteps.length ? `${state.recentSteps.length} последних результатов передано Jev.` : 'Ранее выполненных шагов нет.' });
   if (state.currentFacts && typeof state.currentFacts === 'object') fields.push({ label: 'Текущие факты', value: 'Текущие факты тестового окна.' });
   if (state.supportedWorld && typeof state.supportedWorld === 'object') fields.push({ label: 'Допустимый сценарий', value: 'Описание разрешённого мира задачи.' });
   if (!fields.length) fields.push({ label: 'Данные запроса', value: 'В отчёте нет перечисления отправленных полей.' });
@@ -343,7 +387,8 @@ function requestData(request) {
 }
 
 function stepTitle(call, questionKey) {
-  if (questionKey === 'next_action') return 'Выбор следующего действия';
+  if (call?.kind === 'route' || questionKey === 'route') return 'Выбор исполнителя команды';
+  if (questionKey === 'next_action' || questionKey === 'next_step') return 'Выбор следующего действия';
   if (call?.kind === 'goal' || questionKey.startsWith('desired_') || questionKey === 'request_kind') return QUESTION_TITLES[questionKey] ?? `Проверка: ${questionKey}`;
   return QUESTION_TITLES[questionKey] ?? `Решение: ${questionKey.replaceAll('_', ' ')}`;
 }
@@ -352,25 +397,34 @@ function stepTitle(call, questionKey) {
 export function formatDecisionLog(report = {}) {
   const candidates = candidateMaps(report);
   const steps = [];
-  for (const [callIndex, call] of boundedArray(report?.calls, MAX_CALLS).entries()) {
+  for (const [callIndex, call] of decisionCalls(report).entries()) {
     const request = object(call?.request);
     for (const questionKey of callQuestionEntries(call)) {
       const answer = answerForCall(call, questionKey);
-      const choice = answer.choice ?? answer.actionId ?? '';
-      const selectedAction = humanChoice(choice, { request, questionKey, candidates });
+      const choice = answer.choice ?? answer.actionId ?? answer.route ?? '';
+      const explicitLabel = string(answer.label ?? call.label, 500);
+      const selectedAction = choice === 'done' || choice === 'unavailable' || questionKey === 'route' || call.kind === 'route'
+        ? humanChoice(choice, { request, questionKey: call.kind === 'route' ? 'route' : questionKey, candidates })
+        : explicitLabel || humanChoice(choice, { request, questionKey, candidates });
       const criterion = string(criteriaFor(request, questionKey)[choice], 1600);
       const probability = unit(answer.probability ?? object(answer.probabilities)[choice]);
       const confidence = unit(answer.confidence);
       steps.push({
         index: steps.length + 1,
         callIndex,
-        kind: call?.kind === 'goal' ? 'goal' : 'action',
+        kind: call?.kind === 'route' ? 'route' : call?.kind === 'goal' ? 'goal' : 'action',
         title: stepTitle(call, questionKey),
         question: questionKey,
         selectedAction,
         criterion,
         probability,
         confidence,
+        provider: providerName(call.provider ?? answer.provider ?? 'jev'),
+        model: string(answer.model ?? call.response?.model ?? request.model, 120),
+        latencyMs: number(answer.latencyMs ?? call.latencyMs ?? call.response?.latencyMs),
+        requestJson: technicalJson(call.request),
+        responseJson: technicalJson(call.normalizedResponse ?? call.decision ?? call.response),
+        responseNormalized: Boolean(call.normalizedResponse ?? call.decision),
         alternatives: alternatives(answer, request, questionKey, candidates),
         dataSent: requestData(request),
         // Internal id is deliberately secondary metadata for diagnostics only.
@@ -384,20 +438,22 @@ export function formatDecisionLog(report = {}) {
 
 function eventList(report) {
   const source = array(report?.trace).length ? report.trace : report?.events;
-  return boundedArray(source, MAX_STEPS * 10).filter(item => item && typeof item === 'object');
+  return [...array(source), ...array(report?.desktopEvents)].slice(0, MAX_STEPS * 10).filter(item => item && typeof item === 'object');
 }
 function executionStatus({ ok, verified, outcome, stateChanged, failed, effectConfirmed, needsObservation }) {
   if (failed || ok === false || outcome === 'failed' || outcome === 'not_verified') return 'failed';
+  if (outcome === 'already_satisfied') return 'already_satisfied';
   if (verified === true || outcome === 'verified') return 'verified';
+  if (outcome === 'dispatched') return 'pending_verification';
   if (effectConfirmed === true && needsObservation === true) return 'pending_verification';
   if (ok === true || stateChanged === true || outcome === 'observed_change' || outcome === 'executed' || outcome === 'local_saved' || outcome === 'success') return 'executed';
   return 'pending';
 }
 function executionLabel(candidate, id, operation, fallbackLabel = '') {
+  if (string(fallbackLabel)) return string(fallbackLabel);
   if (candidate?.label) return string(candidate.label);
   if (TOOL_LABELS[operation]) return TOOL_LABELS[operation];
   if (OPERATION_LABELS[operation]) return OPERATION_LABELS[operation];
-  if (hasCyrillic(fallbackLabel)) return string(fallbackLabel);
   if (operation) return operationLabel(operation);
   return id ? 'Инструмент выполнил шаг' : 'Шаг выполнения';
 }
@@ -406,6 +462,73 @@ function identifierKey(key) {
 }
 function sensitiveKey(key) {
   return /token|secret|password|authorization|api[_-]?key/iu.test(key);
+}
+function technicalJson(value) {
+  if (!value || typeof value !== 'object') return '';
+  // Requests and normalized responses contain no credentials by contract; redact
+  // sensitive keys defensively if an imported journal violates that contract.
+  const json = JSON.stringify(value, (key, item) => sensitiveKey(key) && !/^(?:input|output|total|cached)_tokens$/u.test(key) ? '[скрыто]' : item, 2);
+  return json.length <= 96000 ? json : `${json.slice(0, 96000)}\n… Полные данные — в техническом JSON отчёта.`;
+}
+function providerName(value) {
+  const name = string(value, 120).toLowerCase();
+  if (name.includes('jev') || name.includes('typesafe')) return 'Jev';
+  if (name.includes('gemini')) return 'Gemini';
+  return '';
+}
+function runtimeLabel(provider, route) {
+  if (route === 'desktop') return `Управление Windows — ${provider}`;
+  if (route === 'memory') return `Заметки и напоминания — ${provider}`;
+  if (route === 'conversation') return `Ответ на вопрос — ${provider}`;
+  return provider ? `Исполнитель — ${provider}` : 'Исполнитель ещё не выбран';
+}
+/** The displayed runtime comes from the selected route or actual provider events. */
+export function formatRuntimeProvider(report = {}) {
+  const events = eventList(report);
+  const selectedRoute = report.delegation?.route ?? events.findLast(event => event.phase === 'desktop_delegate_request' || event.phase === 'assistant_delegate_request')?.route;
+  if (report.status === 'running') {
+    for (const event of events.slice().reverse()) {
+      if (event.phase === 'desktop_delegate_request') return {provider: 'Jev', route: 'desktop', label: runtimeLabel('Jev', 'desktop')};
+      if (event.phase === 'assistant_delegate_request') {
+        const route = event.route ?? selectedRoute ?? report.routing?.route;
+        return {provider: 'Gemini', route, label: runtimeLabel('Gemini', route)};
+      }
+      if (String(event.phase ?? '').startsWith('agent_')) return {provider: 'Gemini', route: selectedRoute, label: runtimeLabel('Gemini', selectedRoute)};
+      if (String(event.phase ?? '').startsWith('model_')) return {provider: 'Jev', route: 'desktop', label: runtimeLabel('Jev', 'desktop')};
+      if (String(event.phase ?? '').startsWith('route_')) return {provider: 'Jev', route: 'routing', label: 'Выбор исполнителя — Jev'};
+    }
+  }
+  const delegation = object(report.delegation);
+  if (!delegation.provider && report.mode === 'JEV_ASSISTANT') return {provider: 'Jev', route: 'routing', label: 'Выбор исполнителя — Jev'};
+  const provider = providerName(delegation.provider ?? report.provider) || (report.mode === 'JEV_DESKTOP' ? 'Jev' : report.mode === 'AGENT_ASSISTANT' || report.mode === 'GEMINI_CHAT' ? 'Gemini' : '');
+  const route = delegation.route ?? (report.mode === 'JEV_DESKTOP' ? 'desktop' : report.mode === 'GEMINI_CHAT' ? 'conversation' : undefined);
+  if (provider) return {provider, route, label: runtimeLabel(provider, route)};
+  if (report.routing?.provider || events.some(event => String(event.phase ?? '').startsWith('route_'))) return {provider: 'Jev', route: 'routing', label: 'Выбор исполнителя — Jev'};
+  return {provider: '', route: '', label: 'Исполнитель не записан в отчёте'};
+}
+/** Native step checks and the model's final goal judgment are different evidence. */
+export function formatGoalVerification(report = {}) {
+  if (report.ok === true && (report.goalVerification === 'model_assessed' || report.reason === 'goal_model_assessed')) {
+    return {kind: 'model_assessed', label: 'Итог задачи — оценка Jev', message: 'Jev считает задачу завершённой. Подтверждения Windows ниже относятся к отдельным шагам; итог всей задачи отдельно не проверен.'};
+  }
+  if (report.ok === true && report.reason === 'goal_verified' && report.executionUncertain !== true) {
+    return {kind: 'verified', label: 'Итог задачи подтверждён', message: 'Завершение всей задачи прошло отдельную проверку.'};
+  }
+  return {kind: 'unverified', label: 'Итог задачи не подтверждён', message: report.status === 'running' ? 'Задача ещё выполняется.' : 'Результаты отдельных действий показаны ниже.'};
+}
+export function formatJevProgress(event = {}) {
+  if (event.phase === 'route_request') return 'Jev выбирает исполнителя команды';
+  if (event.phase === 'route_response') return 'Получен выбор исполнителя от Jev';
+  if (event.phase === 'route_decision') return 'Jev выбрал: ' + humanChoice(event.route ?? event.decision?.choice ?? event.decision?.route, {questionKey: 'route'});
+  if (event.phase === 'model_request') return 'Jev выбирает следующий шаг';
+  if (event.phase === 'model_response') return 'Получен ответ Jev';
+  if (event.phase === 'low_confidence_exploration') return 'Jev уточняет доступные элементы: ' + (string(event.label, 500) || 'проверяет окно');
+  if (event.phase === 'model_decision') {
+    const decision = eventDecision(event);
+    const choice = decision.choice ?? decision.actionId;
+    return 'Jev выбрал: ' + (choice === 'done' ? CHOICE_LABELS.done : string(event.label ?? decision.label, 500) || humanChoice(choice));
+  }
+  return '';
 }
 function argumentLabel(key) {
   if (key === 'evidenceIds') return 'подтверждения';
@@ -595,6 +718,9 @@ export function formatExecutionLog(report = {}) {
   const records = [];
   const byId = new Map();
   const byStep = new Map();
+  const byAction = new Map();
+  const stepKey = event => `${event.sourceRunId ?? ''}:${event.step}`;
+  const recordForStep = event => Number.isSafeInteger(event.step) ? byStep.get(stepKey(event)) ?? byStep.get(event.step) : records.at(-1);
   const add = ({ id, label, operation, callId, toolCall, message, evidence, ok, verified, outcome, stateChanged, failed, data, effectConfirmed, needsObservation }) => {
     const key = id || callId || 'step-' + (records.length + 1);
     let record = byId.get(key);
@@ -629,28 +755,34 @@ export function formatExecutionLog(report = {}) {
     }
     if (phase === 'execute_request' || phase === 'native_execute_request' || phase === 'local_execute_request') {
       const candidate = object(event.candidate);
-      const id = string(candidate.id, 160) || string(event.id, 160) || null;
-      const record = add({ id, label: candidate.label, operation: candidate.operation ?? event.operation, message: event.message });
-      if (Number.isSafeInteger(event.step)) byStep.set(event.step, record);
+      const id = string(candidate.id ?? event.actionId ?? event.id, 160) || null;
+      const scopedId = Number.isSafeInteger(event.step) ? `step:${stepKey(event)}:${id ?? ''}` : id;
+      const record = add({ id: scopedId, label: event.label ?? candidate.label, operation: candidate.operation ?? event.operation, message: event.message });
+      if (id) byAction.set(id, record);
+      if (Number.isSafeInteger(event.step)) { byStep.set(stepKey(event), record); byStep.set(event.step, record); }
       continue;
     }
     if (phase === 'execute_result' || phase === 'native_execute_result' || phase === 'local_execute_result') {
-      const receipt = object(event.receipt ?? event.result);
-      const record = Number.isSafeInteger(event.step) ? byStep.get(event.step) : records.at(-1);
-      if (record) add({ id: record.id, message: event.message, evidence: receipt.evidence, ok: receipt.ok, verified: receipt.verified, stateChanged: receipt.stateChanged, outcome: receipt.outcome, data: receipt.data, effectConfirmed: receipt.effectConfirmed, needsObservation: receipt.needsObservation });
+      const result = object(event.result);
+      const receipt = {...object(event.receipt ?? result.data?.receipt), ...result};
+      const record = recordForStep(event);
+      if (record) add({ id: record.id, message: event.message, evidence: receipt.evidence, ok: receipt.ok, verified: receipt.verified, stateChanged: receipt.stateChanged, outcome: receipt.outcome, data: result.data ?? receipt.data, effectConfirmed: receipt.effectConfirmed, needsObservation: receipt.needsObservation });
       continue;
     }
     if (phase === 'verify') {
-      const record = Number.isSafeInteger(event.step) ? byStep.get(event.step) : records.at(-1);
-      if (record) add({ id: record.id, message: event.message, evidence: event.evidence, outcome: event.outcome, verified: event.outcome === 'verified', stateChanged: event.outcome === 'observed_change', failed: event.outcome === 'not_verified', effectConfirmed: event.effectConfirmed, needsObservation: event.needsObservation });
+      const record = recordForStep(event);
+      if (record) add({ id: record.id, message: event.message, evidence: event.evidence, outcome: event.outcome, verified: event.verified === true || event.outcome === 'verified', stateChanged: event.outcome === 'observed_change', failed: event.outcome === 'not_verified', effectConfirmed: event.effectConfirmed, needsObservation: event.needsObservation });
     }
   }
-  for (const completed of boundedArray(report?.completed, MAX_STEPS)) {
+  const completedSteps = [...array(report?.completed), ...array(report?.satisfiedPostconditions).map(item => ({...item, outcome: 'already_satisfied'}))];
+  for (const completed of completedSteps.slice(0, MAX_STEPS)) {
     const candidate = candidates.get(completed?.id);
-    const record = add({ id: string(completed?.id, 160) || null, label: completed?.label ?? candidate?.label, operation: completed?.operation ?? candidate?.operation, evidence: completed?.evidence, outcome: completed?.outcome, verified: completed?.outcome === 'verified', stateChanged: completed?.outcome === 'observed_change', failed: !['verified', 'observed_change', 'success', 'local_saved'].includes(completed?.outcome), effectConfirmed: completed?.outcome === 'observed_change', needsObservation: completed?.outcome === 'observed_change' });
+    const previous = Number.isSafeInteger(completed?.step) ? recordForStep(completed) : byAction.get(completed?.id);
+    const record = add({ id: previous?.id ?? (string(completed?.id, 160) || null), label: completed?.label ?? candidate?.label, operation: completed?.operation ?? candidate?.operation, evidence: completed?.evidence, outcome: completed?.outcome, verified: completed?.outcome === 'verified', stateChanged: completed?.outcome === 'observed_change', failed: !['verified', 'already_satisfied', 'observed_change', 'dispatched', 'success', 'local_saved'].includes(completed?.outcome), effectConfirmed: completed?.outcome === 'observed_change' || completed?.outcome === 'dispatched', needsObservation: completed?.outcome === 'observed_change' || completed?.outcome === 'dispatched' });
     if (completed?.outcome === 'verified') record.status = 'verified';
   }
-  return records.slice(0, MAX_STEPS).map(record => ({ ...record, statusLabel: STATUS_LABELS[record.status] ?? STATUS_LABELS.pending }));
+  const jevDesktop = report.mode === 'JEV_DESKTOP' || report.delegation?.route === 'desktop';
+  return records.slice(0, MAX_STEPS).map(record => ({ ...record, statusLabel: jevDesktop && record.status === 'verified' ? 'Шаг подтверждён Windows' : STATUS_LABELS[record.status] ?? STATUS_LABELS.pending }));
 }
 
 function snapshotFrom(report) {
@@ -675,8 +807,10 @@ export function formatObservation(report = {}) {
   const rawControls = array(snapshot.elements).length ? snapshot.elements : snapshot.controls;
   const controls = boundedArray(rawControls, MAX_CONTROLS).filter(item => object(item).role !== 'Window').map(controlView);
   const selectedId = string(snapshot.facts?.selectedWindowId, 160);
-  const availableWindow = windows.find(item => item.id === selectedId) ?? windows.find(item => item.active) ?? windows[0] ?? null;
-  const metadata = object(snapshot.metadata);
+  const inspectedTitle = string(snapshot.inspected?.title, 260);
+  const inspectedWindow = selectedId ? windows.find(item => item.id === selectedId) : inspectedTitle ? windows.find(item => item.title === inspectedTitle) : null;
+  const availableWindow = inspectedWindow ?? windows.find(item => item.active) ?? windows[0] ?? null;
+  const metadata = {...object(snapshot.coverage), ...object(snapshot.metadata)};
   const coverage = metadata.truncated === true ? 'Наблюдение неполное: часть окон или элементов могла быть пропущена.' : (hasCyrillic(metadata.coverage) ? string(metadata.coverage, 500) : '') || `Наблюдение: окон ${windows.length}, элементов ${controls.length}.`;
   const facts = Object.entries(object(snapshot.facts)).slice(0, 20).map(([key, value]) => ({ label: key.replaceAll('_', ' '), value: typeof value === 'string' ? string(value, 240) : String(value) }));
   return { available: true, coverage, availableWindow, windows, controls, facts, truncated: metadata.truncated === true };
@@ -744,7 +878,7 @@ export function formatDataSent(report = {}) {
   if (isAgentReport(report)) {
     fields.push(...agentRequestFields(report));
   } else {
-    for (const call of boundedArray(report?.calls, MAX_CALLS)) {
+    for (const call of decisionCalls(report)) {
       for (const item of requestData(call?.request)) {
         const key = item.label + '\\0' + item.value;
         if (!fields.some(existing => existing.label + '\\0' + existing.value === key)) fields.push(item);
@@ -811,6 +945,8 @@ export function formatLogView(report = {}) {
     dataSent: formatDataSent(value),
     agentResponses: formatAgentResponses(value),
     agentMode: isAgentReport(value),
+    runtime: formatRuntimeProvider(value),
+    goalVerification: formatGoalVerification(value),
   };
 }
 

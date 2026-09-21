@@ -55,10 +55,12 @@ export async function readRun(runId,{directory=LOG_DIRECTORY,activeRunId,activeR
     return {...redact(report),runId,logPath:file};
   }catch(e){if(e.code==='ENOENT')throw error('RUN_NOT_FOUND');if(/^LOG_/.test(e.code))throw e;throw error('LOG_READ_FAILED');}
 }
-export async function listRuns({directory=LOG_DIRECTORY,activeRunId,activeRunIds=[]}={}){
+export async function listRuns({directory=LOG_DIRECTORY,activeRunId,activeRunIds=[],excludeRunIds=[]}={}){
   await mkdir(directory,{recursive:true});
-  const names=(await readdir(directory)).filter(name=>name.endsWith('.json')&&validId(name.slice(0,-5))).sort().reverse().slice(0,20);
-  const runs=[];
-  for(const name of names){try{const r=await readRun(name.slice(0,-5),{directory,activeRunId,activeRunIds});const {tone,title}=describeResult(r);runs.push({runId:r.runId,createdAt:r.createdAt,command:r.command,status:r.status,ok:r.ok,reason:r.reason,elapsedMs:r.elapsedMs,feedback:{tone,title}});}catch{runs.push({runId:name.slice(0,-5),ok:false,reason:'LOG_READ_FAILED'});}}
-  return {runs};
+  const names=(await readdir(directory)).filter(name=>name.endsWith('.json')&&validId(name.slice(0,-5))).sort().reverse().slice(0,40);
+  const runs=[],children=new Set(excludeRunIds);
+  for(const name of names){try{const r=await readRun(name.slice(0,-5),{directory,activeRunId,activeRunIds});if(validId(r.childRunId))children.add(r.childRunId);const {tone,title}=describeResult(r);runs.push({runId:r.runId,createdAt:r.createdAt,command:r.command,status:r.status,ok:r.ok,reason:r.reason,elapsedMs:r.elapsedMs,feedback:{tone,title}});}catch{runs.push({runId:name.slice(0,-5),ok:false,reason:'LOG_READ_FAILED'});}}
+  // The routing and desktop/data journals are one user task. Child logs stay
+  // accessible by ID and are embedded in the parent, not duplicate history rows.
+  return {runs:runs.filter(run=>!children.has(run.runId)).slice(0,20)};
 }

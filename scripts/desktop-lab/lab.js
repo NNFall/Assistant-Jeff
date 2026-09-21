@@ -1,7 +1,7 @@
 'use strict';
 import {VoiceClient} from './voice-client.mjs';
 import {describeResult,describeError} from '../../desktop/automation/feedback.mjs';
-import {formatAgentProgress,formatLogView} from '../../desktop/automation/log-view.mjs';
+import {formatAgentProgress,formatDecisionLog,formatJevProgress,formatLogView,formatRuntimeProvider} from '../../desktop/automation/log-view.mjs';
 
 const $=id=>document.getElementById(id);
 const api=window.lab;
@@ -15,6 +15,7 @@ const operationLabels={inspect:'Проверяю нужное окно',activate
 const text=(id,value)=>{if($(id))$(id).textContent=value??'';};
 const hidden=(id,value)=>{if($(id))$(id).hidden=value;};
 const duration=ms=>Number.isFinite(ms)?`${(ms/1000).toLocaleString('ru-RU',{maximumFractionDigits:1})} с`:'';
+const latency=ms=>Number.isFinite(ms)?ms<1000?`${Math.round(ms)} мс`:duration(ms):'Нет данных';
 const pretty=value=>JSON.stringify(value??null,null,2);
 function busy(){return pending||voiceState.busy;}
 function failure(error){return describeError(error?.code??error?.error??error?.name??'ASSISTANT_ERROR');}
@@ -28,7 +29,7 @@ function clearNotice(){hidden('voice-notice',true);hidden('voice-metrics',true);
 function clearTranscript(){text('voice-transcript','');hidden('voice-transcript',true);delete $('voice-transcript').dataset.final;}
 function resetConversationView(){
   serial++;lastReport=null;detailReport=null;lastFinishedRunId=null;currentRunId=null;activeSource=null;startedAt=0;progressEvents=[];activities=[];clearNotice();clearTranscript();
-  $('command').value='';hidden('task-card',true);hidden('welcome',false);hidden('readable-log',true);hidden('result-actions',true);$('activity-list').replaceChildren();$('task-card').dataset.tone='neutral';$('task-card').setAttribute('aria-busy','false');text('trace','Запустите задачу, чтобы увидеть отчёт.');text('task-time','');text('task-command','');text('activity','');
+  $('command').value='';hidden('task-card',true);hidden('welcome',false);hidden('readable-log',true);hidden('result-actions',true);$('activity-list').replaceChildren();$('task-card').dataset.tone='neutral';$('task-card').setAttribute('aria-busy','false');text('trace','Запустите задачу, чтобы увидеть отчёт.');text('task-time','');text('task-command','');text('activity','');text('task-provider','');text('task-decision','');hidden('task-decision',true);
   if($('details-dialog').open)$('details-dialog').close();
 }
 async function newConversation(){
@@ -72,6 +73,7 @@ function startTask(command,source){
   activeSource=source;pending=true;stopping=false;currentRunId=null;lastReport=null;detailReport=null;progressEvents=[];activities=[];clearNotice();
   hidden('welcome',true);hidden('task-card',false);$('task-card').dataset.tone='working';$('task-card').setAttribute('aria-busy','true');
   text('task-command',command||'Голосовая команда');text('task-state','Выполняется');text('result-title','Приступаю');text('result-message','');text('activity','Проверяю задачу');
+  text('task-provider','Исполнитель ещё не выбран');text('task-decision','');hidden('task-decision',true);
   text('trace','Ожидаем первые шаги');hidden('result-actions',true);hidden('activity-list',false);$('activity-list').replaceChildren();
   startedAt=performance.now();clearInterval(ticker);ticker=setInterval(taskClock,250);taskClock();sync();
 }
@@ -81,9 +83,9 @@ function renderActivities(finalTone){
   for(const item of items){const li=document.createElement('li');li.dataset.state=finalTone&&finalTone!=='success'?'neutral':'done';li.textContent=item.label;$('activity-list').append(li);}
 }
 function activity(event){
-  let label=String(event?.phase??'').startsWith('agent_')?formatAgentProgress(event):phaseLabels[event.phase];
-  if(event.phase==='execute_request')label=operationLabels[event.operation??event.candidate?.operation]||'Выполняю действие';
-  if(event.phase==='verify')label=event.outcome==='verified'?'Действие подтверждено':event.outcome==='observed_change'?'Проверяю изменения':'Результат действия требует проверки';
+  let label=String(event?.phase??'').startsWith('agent_')?formatAgentProgress(event):formatJevProgress(event)||phaseLabels[event.phase];
+  if(event.phase==='execute_request')label=event.label||event.candidate?.label||operationLabels[event.operation??event.candidate?.operation]||'Выполняю действие';
+  if(event.phase==='verify')label=event.outcome==='already_satisfied'?'Windows: уже в нужном состоянии':event.outcome==='verified'?'Шаг подтверждён Windows':event.outcome==='observed_change'?'Изменение наблюдалось, проверяю цель':'Результат действия требует проверки';
   if(event.phase==='local_execute_result')label=event.result?.ok?'Сохранено':'Не удалось сохранить';
   if(!label)return;
   if(activities.at(-1)?.label!==label)activities.push({label,time:new Date(event.time??Date.now())});
@@ -98,6 +100,7 @@ function finishReport(report){
   hidden('task-card',false);hidden('welcome',true);$('task-card').dataset.tone=feedback.tone;$('task-card').setAttribute('aria-busy','false');
   text('task-command',report.command||$('task-command').textContent||'Задача');text('task-state',report.needsClarification===true?'Нужно уточнение':feedback.tone==='success'?'Готово':feedback.tone==='neutral'?'Завершено':feedback.tone==='warning'?'Нужна проверка':'Не получилось');
   text('result-title',feedback.title);text('result-message',feedback.message);text('activity','');text('task-time',duration(report.elapsedMs));
+  renderTaskProvider(report);renderTaskDecision(report);
   hidden('activity-list',true);
   hidden('result-actions',false);$('edit-command').disabled=false;hidden('edit-command',report.mode==='GEMINI_CHAT'&&report.ok===true);
   text('trace',pretty(report));clearInterval(ticker);sync();
@@ -119,7 +122,13 @@ function acceptProgress(event){
   if(event.runId&&event.runId===lastFinishedRunId)return;
   if(currentRunId&&event.runId&&currentRunId!==event.runId)return;
   if(event.runId)currentRunId=event.runId;
-  progressEvents.push(event);text('trace',pretty({status:'running',runId:currentRunId,events:progressEvents}));activity(event);
+  progressEvents.push(event);const report={status:'running',runId:currentRunId,events:progressEvents};text('trace',pretty(report));renderTaskProvider(report);if(event.phase==='model_decision'||event.phase==='route_decision')renderTaskDecision(report);activity(event);
+}
+function renderTaskProvider(report){text('task-provider',formatRuntimeProvider(report).label);}
+function renderTaskDecision(report){
+  const decision=formatDecisionLog(report).at(-1);hidden('task-decision',!decision);if(!decision)return;
+  const metrics=[];if(Number.isFinite(decision.probability))metrics.push(`вероятность ${percent(decision.probability)}`);if(Number.isFinite(decision.confidence))metrics.push(`уверенность ${percent(decision.confidence)}`);if(Number.isFinite(decision.latencyMs))metrics.push(`ответ за ${latency(decision.latencyMs)}`);
+  text('task-decision',`${decision.provider||'Модель'}: ${decision.selectedAction}${metrics.length?' · '+metrics.join(' · '):''}`);
 }
 function renderVoiceState(state){
   if(state.state==='recording'&&voiceState.state!=='recording'||['off','stopped','idle','waiting','error'].includes(state.state)&&$('voice-transcript').dataset.final==='false')clearTranscript();
@@ -209,14 +218,17 @@ function renderDecisionSteps(steps){
   const list=$('decision-steps'),empty=$('decision-empty');if(!list)return;list.replaceChildren();hidden('decision-empty',Boolean(steps?.length));
   for(const step of steps??[]){
     const item=element('li','decision-step'),heading=element('div','log-step-heading'),number=element('span','log-step-number'),kind=element('span','log-step-kind'),action=element('strong','log-step-action'),metrics=element('dl','log-metrics');
-    number.textContent=`Шаг ${step.index}`;kind.textContent=step.kind==='goal'?'Проверка цели':'Решение модели';action.textContent=step.selectedAction;heading.append(number,kind);item.append(heading,action);
-    metrics.append(logMetric('Вероятность выбора',percent(step.probability)),logMetric('Уверенность модели',percent(step.confidence)));item.append(metrics);
+    number.textContent=`Решение ${step.index}`;kind.textContent=[step.provider,step.kind==='route'?'Выбор исполнителя':step.kind==='goal'?'Оценка цели':'Выбор действия'].filter(Boolean).join(' · ');action.textContent=step.selectedAction;heading.append(number,kind);item.append(heading,action);
+    metrics.append(logMetric('Вероятность выбора',percent(step.probability)),logMetric('Уверенность модели',percent(step.confidence)),logMetric('Время ответа',latency(step.latencyMs)));item.append(metrics);
     if(step.criterion){const detail=element('p','log-detail');detail.textContent=step.criterion;item.append(detail);}
     if((step.alternatives??[]).length>1){
       const disclosure=document.createElement('details');disclosure.className='log-options';const summary=document.createElement('summary');summary.textContent=`Все варианты (${step.alternatives.length})`;const table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr');
       for(const label of ['Вариант','Вероятность']){const cell=document.createElement('th');cell.textContent=label;row.append(cell);}head.append(row);const body=document.createElement('tbody');
       for(const alternative of step.alternatives){const optionRow=document.createElement('tr'),labelCell=document.createElement('td'),probabilityCell=document.createElement('td');labelCell.textContent=alternative.label;probabilityCell.textContent=percent(alternative.probability);optionRow.append(labelCell,probabilityCell);body.append(optionRow);}
       table.append(head,body);disclosure.append(summary,table);item.append(disclosure);
+    }
+    for(const [title,value] of [[`Точный запрос ${step.provider||'к модели'}`,step.requestJson],[`${step.responseNormalized?'Нормализованный ответ':'Ответ'} ${step.provider||'модели'}`,step.responseJson]]){
+      if(!value)continue;const disclosure=document.createElement('details');disclosure.className='model-payload';const summary=document.createElement('summary'),payload=document.createElement('pre');summary.textContent=title;payload.textContent=value;disclosure.append(summary,payload);item.append(disclosure);
     }
     list.append(item);
   }
@@ -267,7 +279,7 @@ function renderAgentResponses(responses){
   for(const response of responses??[]){const item=element('li');item.textContent=response.text;list.append(item);}
 }
 function renderReadableLog(report){
-  const panel=$('readable-log');if(!panel)return;const model=formatLogView(report??{});hidden('readable-log',false);text('readable-log-intro',model.agentMode?'Здесь показано, какие данные получил Jeff, какие операции выполнил и что было подтверждено.':'Здесь показаны выбранные варианты, вероятность выбора и уверенность модели отдельно. Идентификаторы вариантов оставлены только в технических данных ниже.');renderDataSent(model.dataSent);renderCapabilities(model.capabilities,model.context);renderDecisionSteps(model.decisions);renderExecutionSteps(model.executions);renderReadableObservation(model.observation);renderAgentResponses(model.agentResponses);
+  const panel=$('readable-log');if(!panel)return;const model=formatLogView(report??{});hidden('readable-log',false);text('readable-log-intro','Здесь показаны исполнители, выбранные действия и результаты проверок. Вероятность выбора и уверенность Jev относятся к решению модели; подтверждение Windows — к отдельному действию.');text('detail-provider',model.runtime.label);const showGoal=model.runtime.route==='desktop'||Boolean(report?.goalVerification)||String(report?.reason??'').startsWith('goal_');hidden('goal-verification-panel',!showGoal);text('goal-verification-title',model.goalVerification.label);text('goal-verification-message',model.goalVerification.message);renderDataSent(model.dataSent);renderCapabilities(model.capabilities,model.context);renderDecisionSteps(model.decisions);renderExecutionSteps(model.executions);renderReadableObservation(model.observation);renderAgentResponses(model.agentResponses);
 }
 async function hydrateCapabilities(report){
   const hasCapabilities=Array.isArray(report?.capabilities)||Array.isArray(report?.capabilities?.capabilities);
@@ -296,8 +308,8 @@ async function openDetails(report=lastReport){
 async function refreshProviders(){
   try{
     const result=checked(await api.voiceStatus());
-    for(const [id,key,label] of [['provider-gemini','gemini','Gemini'],['provider-denis','denis','Денис'],['provider-wake','wake','Hey Jarvis']]){
-      text(id,result.providers?.[key]===true?`${label} настроен`:`${label} недоступен`);$(id).dataset.available=String(result.providers?.[key]===true);
+    for(const [id,key,label] of [['provider-jev','jev','Jev'],['provider-gemini','gemini','Gemini'],['provider-denis','denis','Денис'],['provider-wake','wake','Hey Jarvis']]){
+      const available=key==='jev'?result.providers?.jev??result.providers?.typesafe:result.providers?.[key];text(id,available===true?`${label} настроен`:available===false?`${label} недоступен`:'Статус подключения не указан');$(id).dataset.available=typeof available==='boolean'?String(available):'unknown';
     }
     text('version-label',result.version?`Версия ${result.version}`:'Assistant Jeff');
   }catch(error){text('provider-gemini',failure(error).message);}

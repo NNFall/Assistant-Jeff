@@ -1,5 +1,6 @@
-// Real Electron main/preload/renderer and isolated SQLite; every external boundary
-// is replaced before main loads. Run with electron.cmd ... --mock-only [--screenshots].
+// Real Electron main/preload/renderer, Jev facade/loop and isolated SQLite.
+// Every external boundary is replaced before main loads; no live providers,
+// Windows actions or microphone. Run with electron.cmd ... --mock-only [--screenshots].
 import assert from 'node:assert/strict';
 import {app,BrowserWindow} from 'electron';
 import {mkdir,mkdtemp,writeFile,readFile} from 'node:fs/promises';
@@ -26,12 +27,21 @@ async function main(){
   await mkdir(path.join(root,'work'),{recursive:true});
   const directory=await mkdtemp(path.join(root,'work','ui-smoke-agent-'));
   const data=path.join(directory,'data');
-  const checks=[],screenshots=[],modelCalls=[],reports=[],speech=[];
+  const checks=[],screenshots=[],modelCalls=[],jevCalls=[],nativeCalls=[],reports=[],speech=[];
   const blocked={network:0,native:0,launch:0,microphone:0,encoder:0};
   const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const pass=(name,details={})=>checks.push({name,ok:true,...details});
   const forbid=counter=>async()=>{blocked[counter]++;throw new Error(`SMOKE_FORBIDDEN_${counter.toUpperCase()}`);};
-  const snapshot={version:'fixture-v1',windows:[],elements:[],facts:{},metadata:{fixture:true}};
+  const snapshot={version:'a'.repeat(32),windows:[],elements:[],facts:{},metadata:{fixture:true}};
+  const fixtureKey='ui-fixture-only-not-a-real-key';
+  let desktopState={revision:1,selected:null,wrapped:false,minimized:false};
+  const desktopSnapshot=()=>{
+    const win={id:'win_smoke_editor',title:'Редактор проверки',processName:'smoke_editor',stateVersion:desktopState.revision.toString(16).padStart(64,'0'),active:!desktopState.minimized,minimized:desktopState.minimized,maximized:false};
+    return {version:desktopState.revision.toString(16).padStart(32,'0'),windows:[win],elements:[
+      {id:win.id,windowId:win.id,label:win.title,role:'Window',capabilities:['inspect','minimize']},
+      ...(desktopState.selected?[{id:'el_smoke_wrap',windowId:win.id,label:'Перенос строк',name:'Перенос строк',role:'CheckBox',capabilities:['toggle'],toggleState:desktopState.wrapped?'On':'Off',enabled:true,offscreen:false}]:[]),
+    ],facts:{selectedWindowId:desktopState.selected,surfaceStatus:desktopState.selected?'available':'not_selected'},metadata:{provider:'isolated UI fixture',truncated:false}};
+  };
   let window,lab,db,js,currentScenario;
   async function until(check,label,timeout=15000){
     const started=Date.now();
@@ -59,7 +69,7 @@ async function main(){
     try{
       for(const [width,height] of [[1100,800],[760,620]]){
         window.setContentSize(width,height);await pause(150);
-        await js(label==='agent-details'?'window.scrollTo(0,0)':'document.getElementById("task-card").scrollIntoView({block:"nearest",behavior:"instant"})');
+        await js(label.includes('details')?'document.getElementById("details-dialog").scrollTop=0':'document.getElementById("task-card").scrollIntoView({block:"nearest",behavior:"instant"})');
         let timer;
         const image=await Promise.race([window.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('SCREENSHOT_TIMEOUT')),5000);})]).finally(()=>clearTimeout(timer));
         assert.equal(image.isEmpty(),false,'Screenshot must have pixels');
@@ -72,15 +82,68 @@ async function main(){
   try{
     await mkdir(data,{recursive:true});
     process.env.JEFF_DATA_DIR=data;
+    process.env.TYPESAFE_API_KEY=fixtureKey;
     process.argv.push('--windows-smoke');
     const setPath=app.setPath.bind(app);
     app.setPath=(name,value)=>setPath(name,name==='userData'?path.join(directory,'profile'):value);
-    globalThis.fetch=forbid('network');
+    globalThis.fetch=async(url,options={})=>{
+      if(url!=='https://api.typesafe.ai/v1/systemone'||options.method!=='POST')return forbid('network')();
+      options.signal?.throwIfAborted();
+      assert.equal(options.headers?.Authorization,`Bearer ${fixtureKey}`);
+      assert.ok(currentScenario,'Unexpected Jev request outside a registered scenario');
+      const request=JSON.parse(options.body);
+      assert.equal(request.state.command,currentScenario.command);
+      assert.deepEqual(Object.keys(request.questions),['next_step']);
+      const routing=request.state.candidates.every(item=>item.operation==='route');
+      let choice;
+      if(routing){
+        assert.equal(currentScenario.routeCalls++,0,'Exactly one Jev route call per command');
+        choice=currentScenario.route;
+        assert.ok(request.state.candidates.some(item=>item.id===choice));
+      }else{
+        assert.equal(currentScenario.route,'desktop','Only the desktop route may ask Jev for a UI step');
+        const planned=currentScenario.desktopSteps[currentScenario.desktopCalls++];
+        assert.ok(planned,'Unexpected additional Jev desktop decision');
+        const candidate=planned==='done'?null:request.state.candidates.find(item=>item.operation===planned);
+        assert.ok(planned==='done'||candidate,`Missing observed candidate ${planned}`);
+        choice=candidate?.id??'done';
+        assert.ok(nativeCalls.some(item=>item.method==='observe'),'A desktop choice follows a fresh observation');
+        if(planned==='toggle')assert.equal(request.state.observation.inspected?.title,'Редактор проверки');
+        if(planned==='minimize')assert.equal(request.state.observation.controls.find(item=>item.name==='Перенос строк')?.toggleState,'On');
+        if(planned==='done'){
+          assert.equal(request.state.observation.windows[0].minimized,true);
+          assert.deepEqual(request.state.recentSteps.map(item=>item.operation),['inspect','toggle','minimize']);
+        }
+      }
+      const labels=Object.keys(request.questions.next_step.criteria);
+      const probabilities=Object.fromEntries(labels.map(label=>[label,label===choice ? .96 : .04/(labels.length-1)]));
+      const response={model:'jev-ui-fixture',usage:{input_tokens:100,output_tokens:20},answers:{next_step:{type:'choice',choice,confidence:.91,probabilities}}};
+      jevCalls.push({kind:routing?'route':'step',command:currentScenario.command,request:structuredClone(request),response:structuredClone(response)});
+      await pause(15);options.signal?.throwIfAborted();
+      return new Response(JSON.stringify(response),{status:200,headers:{'content-type':'application/json'}});
+    };
     for(const name of ['spawn','spawnSync','exec','execSync','execFile','execFileSync','fork'])childProcess[name]=()=>{blocked.launch++;throw new Error('SMOKE_FORBIDDEN_CHILD_PROCESS');};
     syncBuiltinESMExports();
     WindowsBridge.prototype.startProcess=forbid('native');
-    WindowsBridge.prototype.request=async method=>{
-      if(method==='observe')return structuredClone(snapshot);
+    WindowsBridge.prototype.request=async(method,args={},signal)=>{
+      signal?.throwIfAborted();nativeCalls.push({method,args:structuredClone(args),command:currentScenario?.command??null});
+      if(method==='observe'){
+        if(currentScenario?.route!=='desktop')return structuredClone(snapshot);
+        if(Object.hasOwn(args,'windowId')&&args.windowId!==desktopState.selected){
+          assert.ok(args.windowId===null||args.windowId==='win_smoke_editor');desktopState.selected=args.windowId;desktopState.revision++;
+        }
+        return desktopSnapshot();
+      }
+      if(method==='audio_outputs_get')return {provider:'windows_coreaudio',verified:true,effectAttempted:false,devices:[],defaultDeviceId:null};
+      if(method==='execute'&&currentScenario?.route==='desktop'){
+        const before=desktopSnapshot();assert.equal(args.expectedVersion,before.version);
+        assert.equal(nativeCalls.at(-2)?.method,'observe','A native effect follows immediate fresh inspection');
+        if(args.operation==='toggle'){assert.equal(args.targetId,'el_smoke_wrap');assert.equal(desktopState.wrapped,false);desktopState.wrapped=true;}
+        else if(args.operation==='minimize'){assert.equal(args.targetId,'win_smoke_editor');assert.equal(desktopState.wrapped,true);assert.equal(args.expectedWindowVersion,before.windows[0].stateVersion);desktopState.minimized=true;}
+        else return forbid('native')();
+        desktopState.revision++;await pause(20);
+        return {operation:args.operation,targetId:args.targetId,verified:true,stateChanged:true,effectAttempted:true,evidence:args.operation==='toggle'?'toggle_state_verified':'window_minimized',before,after:desktopSnapshot()};
+      }
       return forbid('native')();
     };
     WindowsDesktop.prototype.run=forbid('native');
@@ -92,6 +155,8 @@ async function main(){
     GeminiGateway.prototype.agentStep=async function(payload,{signal}={}){
       signal?.throwIfAborted();
       assert.ok(currentScenario,'Unexpected model call outside a registered scenario');
+      assert.notEqual(currentScenario.route,'desktop','Gemini must never handle the desktop route');
+      assert.ok(payload.tools.every(tool=>!/^windows_|^winapp_|^system_volume_|^assistant_minimize$/u.test(tool.name)),'Gemini receives data-only tools');
       const step=currentScenario.steps[currentScenario.calls++];
       assert.equal(typeof step,'function',`Unexpected extra model step for ${currentScenario.command}`);
       const copy=structuredClone(payload);modelCalls.push({command:currentScenario.command,payload:copy});
@@ -120,22 +185,31 @@ async function main(){
       navigator.mediaDevices.getUserMedia=async()=>{window.__agentSmoke.captures++;throw new Error('SMOKE_MICROPHONE_FORBIDDEN');};
       window.Audio=class {async play(){window.__agentSmoke.plays++;setTimeout(()=>this.onended?.(),20);}pause(){}};
       window.lab.onVoiceEvent(event=>{if(event.type==='result')window.__agentSmoke.reports.push(event.report);});
-      window.lab.onProgress(event=>window.__agentSmoke.progress.push(event));void 0;`);
+      window.lab.onProgress(event=>window.__agentSmoke.progress.push({...event,uiProvider:document.getElementById('task-provider').textContent,uiDecision:document.getElementById('task-decision').textContent}));void 0;`);
     db=new DatabaseSync(path.join(data,'assistant.sqlite'));
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM notes').get().n,0);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM reminders').get().n,0);
     assert.match(await js('document.getElementById("footer-status").textContent'),/выключен/u);
     const initialCapabilities=await js('window.lab.capabilities()');
     pass('Actual main/preload/renderer opens with empty isolated SQLite and microphone off');
+    const roles=await js('document.querySelector(".provider-roles").textContent');
+    for(const label of ['Управление Windows — Jev','Распознавание речи — Gemini','Заметки, напоминания и ответы — Gemini'])assert.ok(roles.includes(label),label);
+    await js('document.querySelector("[data-view=settings]").click();');
+    await until(()=>js('document.getElementById("provider-jev").textContent==="Jev настроен" && document.getElementById("provider-gemini").textContent==="Gemini настроен"'),'provider connection roles');
+    await js('document.querySelector("[data-view=assistant]").click();');
+    pass('Static roles and actual Jev/Gemini availability are visible without microphone activation');
 
-    async function submit(command,steps,expectedReason){
+    async function submit(command,steps,expectedReason,{route='memory',desktopSteps=[]}={}){
       const before=await js('window.__agentSmoke.reports.length');
-      currentScenario={command,steps,calls:0,requests:[]};
+      currentScenario={command,steps,calls:0,requests:[],route,routeCalls:0,desktopSteps,desktopCalls:0};
       await js(`document.getElementById('command').value=${JSON.stringify(command)};document.getElementById('command').dispatchEvent(new Event('input'));document.getElementById('run').click();`);
       await until(()=>js(`window.__agentSmoke.reports.length > ${before} && !document.getElementById('run').disabled && document.getElementById('task-card').getAttribute('aria-busy')==='false'`),`settled ${command}`);
       const report=await js('window.__agentSmoke.reports.at(-1)');reports.push(report);
       assert.equal(report.reason,expectedReason,JSON.stringify(report));
       assert.equal(currentScenario.calls,steps.length,'Each planned model step ran exactly once');
+      assert.equal(currentScenario.routeCalls,1,'Jev selected the route exactly once');
+      assert.equal(currentScenario.desktopCalls,desktopSteps.length,'Each planned desktop choice ran exactly once');
+      assert.equal(report.routing.route,route);assert.equal(report.delegation.provider,route==='desktop'?'jev':'gemini');
       const saved=JSON.parse(await readFile(path.join(data,'logs','windows',`${report.runId}.json`),'utf8'));
       assert.equal(saved.status,'finished');assert.equal(saved.reason,report.reason);
       return {report,requests:currentScenario.requests};
@@ -225,18 +299,63 @@ async function main(){
     assert.deepEqual(afterClear.runs.map(item=>item.runId).sort(),beforeClear.runs.map(item=>item.runId).sort());
     const fresh=await submit('Объясни, что такое оперативная память.',[
       call('assistant_respond',{status:'answer',text:'Оперативная память хранит данные запущенных программ.',evidenceIds:[]},'provider-fresh-answer'),
-    ],'agent_answer');
+    ],'agent_answer',{route:'conversation'});
     assert.equal(fresh.requests[0].contents.length,1,'Clear conversation removes prior model context');
     assert.deepEqual(db.prepare('SELECT id,text FROM notes ORDER BY id').all(),savedNotes);
     pass('New conversation clears model/UI context while preserving notes and task history');
 
-    await js('document.querySelector("[data-view=history]").click();');
-    await until(()=>js(`document.querySelectorAll('#history-list button').length===${reports.length}`),'all agent runs visible in history');
-    await js('document.querySelector("#history-list button").click();');
-    await until(()=>js('document.getElementById("details-dialog").open'),'persisted history details');
-    assert.match(await js('JSON.parse(document.getElementById("trace").textContent).mode'),/AGENT/u);
+    const geminiBeforeDesktop=modelCalls.length;
+    const command='Прочитай окно «Редактор проверки», включи перенос строк и сверни это окно.';
+    desktopState={revision:1,selected:null,wrapped:false,minimized:false};
+    const desktop=await submit(command,[],'goal_model_assessed',{route:'desktop',desktopSteps:['inspect','toggle','minimize','done']});
+    assert.equal(modelCalls.length,geminiBeforeDesktop,'Desktop route makes no Gemini inference calls');
+    assert.equal(desktop.report.mode,'JEV_DESKTOP');
+    assert.equal(desktop.report.goalVerification,'model_assessed');
+    assert.equal(desktop.report.effectVerification,'native_postconditions');
+    assert.deepEqual(events(desktop.report).filter(event=>event.phase==='execute_request').map(event=>event.operation),['inspect','toggle','minimize']);
+    assert.deepEqual(nativeCalls.filter(item=>item.command===command&&item.method==='execute').map(item=>item.args.operation),['toggle','minimize']);
+    assert.deepEqual(desktop.report.completed.map(item=>item.operation),['toggle','minimize']);
+    const desktopProgress=await js(`window.__agentSmoke.progress.filter(event=>event.runId===${JSON.stringify(desktop.report.runId)})`);
+    const choices=desktopProgress.filter(event=>event.phase==='model_decision');
+    assert.equal(choices.length,4,'Every child Jev decision reaches the root UI run');
+    assert.ok(choices.every(event=>event.uiProvider==='Управление Windows — Jev'));
+    assert.ok(choices.every(event=>/Jev:/.test(event.uiDecision)&&/вероятность/.test(event.uiDecision)&&/уверенность/.test(event.uiDecision)&&/ответ за/.test(event.uiDecision)));
+    assert.ok(choices.every(event=>!/^Jev: step_\d/.test(event.uiDecision)));
+    assert.equal(await js('document.getElementById("task-provider").textContent'),'Управление Windows — Jev');
+    assert.equal(await js('document.getElementById("task-card").dataset.tone'),'warning');
+    assert.equal(await js('document.getElementById("result-title").textContent'),'Завершено по оценке Jev');
+    assert.match(await js('document.getElementById("result-message").textContent'),/Windows подтвердила выполненные шаги[\s\S]*Итог всей задачи отдельно не проверен/u);
+    await capturePair('jev-desktop-result');
+    pass('Real Jev facade and desktop loop inspect, toggle and minimize with fresh fixture observations and zero Gemini desktop calls',{decisions:choices.length,effects:desktop.report.completed.length});
+
+    await js('document.getElementById("show-details").click();');
+    await until(()=>js('document.getElementById("details-dialog").open'),'Jev details');
+    const desktopLog=await js('({runtime:document.getElementById("detail-provider").textContent,goal:document.getElementById("goal-verification-message").textContent,actions:Array.from(document.querySelectorAll("#decision-steps .log-step-action"),element=>element.textContent),statuses:Array.from(document.querySelectorAll("#execution-steps .execution-status"),element=>element.textContent),payloads:Array.from(document.querySelectorAll("#decision-steps .model-payload pre"),element=>element.textContent)})');
+    assert.equal(desktopLog.runtime,'Управление Windows — Jev');
+    assert.equal(desktopLog.actions.length,5,'Route plus four Jev loop decisions are readable');
+    assert.ok(desktopLog.actions.some(label=>label.includes('Перенос строк')));
+    assert.ok(desktopLog.actions.some(label=>label==='Завершить по оценке Jev'));
+    assert.ok(desktopLog.statuses.every(label=>label==='Шаг подтверждён Windows'));
+    assert.match(desktopLog.goal,/итог всей задачи отдельно не проверен/u);
+    assert.equal(desktopLog.payloads.length,10,'Every decision has a request and normalized response disclosure');
+    assert.deepEqual(JSON.parse(desktopLog.payloads[0]),desktop.report.calls[0].request);
+    assert.deepEqual(JSON.parse(desktopLog.payloads[1]),desktop.report.calls[0].decision);
+    assert.ok(desktopLog.payloads.every(value=>!value.includes(fixtureKey)));
+    await capturePair('jev-desktop-details');
     await js('document.getElementById("close-details").click();');
-    pass('Every agent outcome is persisted and opens through the real history UI');
+    pass('Jev details expose exact exchanges and native step receipts without claiming verified full-goal completion');
+
+    await js('document.querySelector("[data-view=history]").click();');
+    const history=await js('window.lab.history()');
+    assert.ok(reports.every(report=>history.runs.some(item=>item.runId===report.runId)),'Every facade result is discoverable in history');
+    assert.equal(history.runs.length,reports.length,'Child journals do not duplicate facade tasks in history');
+    await until(()=>js(`document.querySelectorAll('#history-list button').length===${history.runs.length}`),'all persisted runs visible in history');
+    const rootIndex=history.runs.findIndex(item=>item.runId===desktop.report.runId);
+    await js(`document.querySelectorAll('#history-list button')[${rootIndex}].click();`);
+    await until(()=>js('document.getElementById("details-dialog").open'),'persisted history details');
+    assert.equal(await js('JSON.parse(document.getElementById("trace").textContent).runId'),desktop.report.runId);
+    await js('document.getElementById("close-details").click();');
+    pass('Every facade outcome is persisted and its root report opens through the real history UI',{visibleRuns:history.runs.length,rootRuns:reports.length});
     assert.match(readable,/заметк/iu);assert.match(readable,/прочит|чтен|Сначала/iu);
     assert.doesNotMatch(readable,/provider-update-before-read|provider-read-note|provider-update-after-read/u);
     assert.doesNotMatch(readable,/\b(?:note_update|note_get|assistant_respond|expectedText|evidenceIds|target_not_read|note_read)\b/u,'Readable details keep tool/schema identifiers in technical JSON only');
@@ -249,10 +368,10 @@ async function main(){
     assert.equal(renderer.captures,0);assert.deepEqual(renderer.errors,[]);
     assert.deepEqual(blocked,{network:0,native:0,launch:0,microphone:0,encoder:0});
     pass('No live provider, native action, process launch, microphone, encoder or renderer failure');
-    await writeFile(path.join(directory,'result.json'),JSON.stringify({ok:true,directory,data,checks,screenshots,blocked,renderer,speech,modelCallCount:modelCalls.length,runIds:reports.map(report=>report.runId)},null,2)+'\n');
+    await writeFile(path.join(directory,'result.json'),JSON.stringify({ok:true,directory,data,checks,screenshots,blocked,renderer,speech,modelCallCount:modelCalls.length,jevCalls,nativeCalls,runIds:reports.map(report=>report.runId)},null,2)+'\n');
     console.log(JSON.stringify({ok:true,checks:checks.length,directory,blocked,screenshots:screenshots.length}));
   }catch(error){
-    await writeFile(path.join(directory,'result.json'),JSON.stringify({ok:false,error:error.stack,checks,blocked,screenshots,directory,modelCalls,reports},null,2)+'\n').catch(()=>{});
+    await writeFile(path.join(directory,'result.json'),JSON.stringify({ok:false,error:error.stack,checks,blocked,screenshots,directory,modelCalls,jevCalls,nativeCalls,reports},null,2)+'\n').catch(()=>{});
     if(window&&!window.isDestroyed()&&js)await js('({body:document.body.innerText,errors:window.__agentSmoke?.errors,reports:window.__agentSmoke?.reports})').then(state=>writeFile(path.join(directory,'failure-state.json'),JSON.stringify(state,null,2))).catch(()=>{});
     console.error(JSON.stringify({ok:false,error:String(error.message).slice(0,500),checks:checks.length,directory}));process.exitCode=1;
   }finally{db?.close();lab?.dispose();app.exit(process.exitCode??0);}

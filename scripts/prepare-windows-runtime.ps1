@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param([string]$FfmpegPath, [string]$FfmpegLicensePath)
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell launched by npm can partially autoload Utility without its
+# script functions. Load the full module before verifying runtime file hashes.
+Import-Module Microsoft.PowerShell.Utility -Force -ErrorAction Stop
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtimeRoot = Join-Path $repositoryRoot 'work\voice-runtime'
 

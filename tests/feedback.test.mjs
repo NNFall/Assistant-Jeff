@@ -17,6 +17,64 @@ test('a verified goal needs explicit success and preserves the spoken success co
   }
 });
 
+test('Jev final assessment does not promote verified Windows steps to a verified goal', () => {
+  for (const reason of ['goal_model_assessed', 'goal_verified']) {
+    const actual = describeResult({
+      ok: true, reason, mode: 'JEV_DESKTOP', goalVerification: 'model_assessed',
+      completed: [effect()], message: 'Задача выполнена без проверки.',
+    });
+    assert.equal(actual.tone, 'warning');
+    assert.equal(actual.title, 'Завершено по оценке Jev');
+    assert.match(actual.message, /Windows подтвердила выполненные шаги/u);
+    assert.match(actual.message, /Итог всей задачи отдельно не проверен/u);
+    assert.match(actual.spoken, /Jev считает/u);
+    assert.doesNotMatch(actual.spoken, /Задача выполнена/u);
+    assert.equal(actual.retryable, false);
+  }
+});
+
+test('Jev receipt wrappers retain native evidence and pending effects override model completion', () => {
+  const confirmed = describeResult({ok: true, reason: 'goal_model_assessed', goalVerification: 'model_assessed', events: [
+    {phase: 'execute_request', step: 1, operation: 'minimize'},
+    {phase: 'execute_result', step: 1, operation: 'minimize', result: {ok: true, data: {receipt: {verified: true, stateChanged: true}}}},
+  ]});
+  assert.match(confirmed.message, /Windows подтвердила выполненные шаги/u);
+  const pending = describeResult({ok: true, reason: 'goal_model_assessed', goalVerification: 'model_assessed', events: [request('minimize')]});
+  assert.notEqual(pending.tone, 'success');
+  assert.doesNotMatch(pending.title, /Завершено/u);
+  assert.match(pending.message, /могло выполниться/u);
+  assert.equal(pending.retryable, false);
+});
+
+test('already satisfied Jev postconditions do not claim that a mutation ran', () => {
+  const events=[request('minimize'), {phase:'execute_result',operation:'minimize',result:{ok:true,verified:true,effectAttempted:false}}];
+  const actual=describeResult({ok:true,reason:'goal_model_assessed',goalVerification:'model_assessed',alreadySatisfied:true,events});
+  assert.equal(actual.title,'Завершено по оценке Jev');
+  assert.match(actual.message,/нужное состояние уже установлено/u);
+  assert.doesNotMatch(actual.message,/выполненные шаги/u);
+  assert.equal(describeResult({reason:'aborted',events}).tone,'neutral');
+});
+
+test('Jev provider errors keep safe friendly explanations after routing or desktop failures', () => {
+  for (const code of ['JEV_STEP_KEY', 'JEV_STEP_NETWORK', 'JEV_STEP_HTTP', 'JEV_STEP_TIMEOUT', 'JEV_STEP_RESPONSE', 'JEV_STEP_INPUT', 'JEV_STEP_ABORTED']) {
+    const description = describeError(code);
+    assert.notEqual(description.title, 'Не получилось завершить задачу');
+    const routed = describeResult({ok: false, reason: 'routing_failed', error: code, message: 'Bearer private-token'});
+    assert.equal(routed.title, description.title);
+    assert.doesNotMatch(JSON.stringify(routed), /private|Bearer/u);
+  }
+  const partial = describeResult({ok: false, reason: 'provider_error', error: 'JEV_STEP_TIMEOUT', completed: [effect()]});
+  assert.match(partial.message, /Часть действий выполнена/u);
+  assert.equal(partial.retryable, false);
+});
+
+test('a recovered Gemini delegation cannot suggest a safe retry before its result arrives', () => {
+  const actual = describeResult({reason: 'interrupted', events: [{phase: 'assistant_delegate_request', route: 'memory'}]});
+  assert.equal(actual.tone, 'warning');
+  assert.match(actual.message, /могло выполниться/u);
+  assert.equal(actual.retryable, false);
+});
+
 test('observation is not represented as a verified success even when report.ok is true', () => {
   for (const report of [
     {ok: true, reason: 'goal_observed'},

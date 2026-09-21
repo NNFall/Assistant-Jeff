@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { formatAgentProgress, formatCapabilities, formatDataSent, formatDataTree, formatDecisionLog, formatExecutionLog, formatLogView, formatObservation } from '../desktop/automation/log-view.mjs';
+import { formatAgentProgress, formatCapabilities, formatDataSent, formatDataTree, formatDecisionLog, formatExecutionLog, formatGoalVerification, formatJevProgress, formatLogView, formatObservation, formatRuntimeProvider } from '../desktop/automation/log-view.mjs';
 
 const currentRequest = {
   state: {
@@ -48,6 +48,113 @@ test('current Jev decisions resolve candidate labels and keep probability separa
   assert.equal(step.alternatives[0].label, 'Свернуть окно: Editor');
   assert.doesNotMatch(step.selectedAction, /g1_a_win_minimize/u);
   assert.match(step.dataSent.find(item => item.label === 'Текст команды').value, /Сверни Editor/u);
+});
+
+function stepRequest(label = 'Свернуть окно: Editor') {
+  return {
+    model: 'jev-latest',
+    state: {command: 'Сверни Editor', observation: {summary: 'Окно редактора открыто.'}, candidates: [{id: 'step_01', label, operation: 'minimize'}], recentSteps: []},
+    questions: {next_step: {type: 'choice', criteria: {step_01: label, done: 'All effects are verified.', unavailable: 'No action can advance the task.'}}},
+  };
+}
+const stepDecision = {choice: 'step_01', actionId: 'step_01', probability: .94, confidence: .87, probabilities: {step_01: .94, done: .04, unavailable: .02}, model: 'jev-test', latencyMs: 173, usage: {input_tokens: 125, output_tokens: 18}};
+
+test('Jev steps expose their human choice, timing and exact normalized exchange', () => {
+  const request = stepRequest();
+  const report = {mode: 'JEV_DESKTOP', provider: 'typesafe/jev', calls: [{request, decision: stepDecision}]};
+  const original = structuredClone(report);
+  const [step] = formatDecisionLog(report);
+  assert.equal(step.selectedAction, 'Свернуть окно: Editor');
+  assert.equal(step.provider, 'Jev');
+  assert.equal(step.latencyMs, 173);
+  assert.equal(step.probability, .94);
+  assert.equal(step.confidence, .87);
+  assert.deepEqual(JSON.parse(step.requestJson), request);
+  assert.deepEqual(JSON.parse(step.responseJson), stepDecision);
+  assert.equal(step.responseNormalized, true);
+  assert.equal(step.alternatives.find(item => item.choice === 'done').label, 'Завершить по оценке Jev');
+  assert.doesNotMatch(step.alternatives.find(item => item.choice === 'unavailable').label, /No action/u);
+  assert.deepEqual(report, original);
+});
+
+test('recovered event-only Jev journals retain request, response and chosen action', () => {
+  const request = stepRequest();
+  const report = {events: [
+    {phase: 'model_request', step: 1, request},
+    {phase: 'model_response', step: 1, response: {model: 'jev-test', answers: {next_step: {type: 'choice', ...stepDecision}}}},
+    {phase: 'model_decision', step: 1, label: 'Свернуть окно: Editor', ...stepDecision},
+  ]};
+  const [step] = formatDecisionLog(report);
+  assert.equal(step.selectedAction, 'Свернуть окно: Editor');
+  assert.equal(step.latencyMs, 173);
+  assert.deepEqual(JSON.parse(step.requestJson), request);
+  assert.equal(JSON.parse(step.responseJson).choice, 'step_01');
+  assert.match(formatJevProgress(report.events[2]), /Jev выбрал: Свернуть окно/u);
+  assert.doesNotMatch(formatJevProgress(report.events[2]), /step_01/u);
+  assert.match(formatJevProgress({phase: 'model_decision', choice: 'done', label: 'Готово'}), /по оценке Jev/u);
+});
+
+test('step-local action identifiers never merge unrelated executions or chosen labels', () => {
+  const report = {mode: 'JEV_DESKTOP', calls: [
+    {request: stepRequest('Свернуть редактор'), decision: stepDecision},
+    {request: stepRequest('Показать браузер'), decision: stepDecision},
+  ], events: [
+    {phase: 'execute_request', step: 1, actionId: 'step_01', label: 'Свернуть редактор', operation: 'minimize'},
+    {phase: 'execute_result', step: 1, result: {ok: true, verified: true}},
+    {phase: 'execute_request', step: 2, actionId: 'step_01', label: 'Показать браузер', operation: 'activate'},
+    {phase: 'execute_result', step: 2, result: {ok: false, verified: false}},
+  ], completed: [{step: 1, id: 'step_01', label: 'Свернуть редактор', operation: 'minimize', outcome: 'verified'}]};
+  assert.deepEqual(formatDecisionLog(report).map(item => item.selectedAction), ['Свернуть редактор', 'Показать браузер']);
+  const records = formatExecutionLog(report);
+  assert.equal(records.length, 2);
+  assert.deepEqual(records.map(item => item.label), ['Свернуть редактор', 'Показать браузер']);
+  assert.deepEqual(records.map(item => item.status), ['verified', 'failed']);
+  assert.equal(records[0].statusLabel, 'Шаг подтверждён Windows');
+});
+
+test('routing decisions and runtime providers distinguish Jev selection from Gemini work', () => {
+  const request = {state: {command: 'Сохрани заметку'}, questions: {route: {criteria: {desktop: 'Windows', memory: 'Заметки', conversation: 'Вопрос'}}}};
+  const report = {mode: 'AGENT_ASSISTANT', provider: 'jev', delegation: {route: 'memory', provider: 'gemini'}, calls: [
+    {kind: 'route', provider: 'jev', request, decision: {choice: 'memory', probability: .97, confidence: .9, latencyMs: 123}},
+  ], events: [{phase: 'agent_request'}]};
+  assert.equal(formatDecisionLog(report)[0].selectedAction, 'Заметки и напоминания — Gemini');
+  assert.equal(formatDecisionLog(report)[0].kind, 'route');
+  assert.equal(formatRuntimeProvider(report).label, 'Заметки и напоминания — Gemini');
+  assert.equal(formatRuntimeProvider({status: 'running', events: [{phase: 'route_request', provider: 'jev'}]}).label, 'Выбор исполнителя — Jev');
+  assert.equal(formatRuntimeProvider({status: 'running', events: [{phase: 'route_request'}, {phase: 'desktop_delegate_request'}]}).label, 'Управление Windows — Jev');
+  assert.equal(formatRuntimeProvider({status: 'running', events: [{phase: 'assistant_delegate_request', route: 'conversation'}, {phase: 'agent_request'}]}).provider, 'Gemini');
+  assert.equal(formatRuntimeProvider({status: 'running', events: [{phase: 'assistant_delegate_request', route: 'memory'}, {phase: 'agent_request'}]}).label, 'Заметки и напоминания — Gemini');
+  assert.equal(formatRuntimeProvider({mode: 'JEV_ASSISTANT', provider: 'jev', reason: 'low_confidence'}).label, 'Выбор исполнителя — Jev');
+});
+
+test('model-assessed final status stays separate from confirmed step receipts', () => {
+  const report = {mode: 'JEV_DESKTOP', ok: true, reason: 'goal_model_assessed', goalVerification: 'model_assessed', events: [
+    {phase: 'execute_request', step: 1, label: 'Свернуть редактор', operation: 'minimize'},
+    {phase: 'execute_result', step: 1, result: {ok: true, data: {receipt: {verified: true, evidence: 'window_minimized'}}}},
+  ]};
+  const model = formatLogView(report);
+  assert.equal(model.executions[0].statusLabel, 'Шаг подтверждён Windows');
+  assert.equal(model.goalVerification.kind, 'model_assessed');
+  assert.match(model.goalVerification.message, /итог всей задачи отдельно не проверен/u);
+  assert.equal(formatGoalVerification({...report, reason: 'goal_verified'}).kind, 'model_assessed');
+  assert.equal(formatGoalVerification({...report, reason: 'goal_verified', goalVerification: 'native_verified'}).kind, 'verified');
+  assert.equal(formatGoalVerification({...report, ok: false, reason: 'aborted'}).kind, 'unverified');
+});
+
+test('already satisfied postconditions stay distinct from executed Windows effects', () => {
+  const [record]=formatExecutionLog({mode:'JEV_DESKTOP',events:[
+    {phase:'execute_request',step:1,actionId:'step_01',label:'Свернуть редактор',operation:'minimize'},
+    {phase:'execute_result',step:1,result:{ok:true,verified:true,effectAttempted:false}},
+    {phase:'verify',step:1,verified:true,outcome:'already_satisfied'},
+  ],satisfiedPostconditions:[{step:1,id:'step_01',label:'Свернуть редактор',operation:'minimize'}]});
+  assert.equal(record.status,'already_satisfied');
+  assert.equal(record.statusLabel,'Уже в нужном состоянии');
+});
+
+test('exact exchange details redact credentials while preserving normalized usage counts', () => {
+  const [step] = formatDecisionLog({calls: [{request: {...stepRequest(), authorization: 'Bearer secret-value'}, decision: {...stepDecision, apiKey: 'private-key'}}]});
+  assert.doesNotMatch(step.requestJson + step.responseJson, /secret-value|private-key/u);
+  assert.equal(JSON.parse(step.responseJson).usage.input_tokens, 125);
 });
 
 test('execution log distinguishes verified, executed and failed outcomes', () => {
@@ -100,6 +207,16 @@ test('observation keeps coverage, available window and current controls bounded'
   const empty = formatObservation({});
   assert.equal(empty.available, false);
   assert.equal(empty.windows.length, 0);
+});
+
+test('compact Jev observations preserve the inspected window and incomplete coverage', () => {
+  const observation={windows:[{title:'Другое окно',app:'other',active:false},{title:'Редактор',app:'editor',active:true}],controls:[{name:'Перенос строк',role:'CheckBox',toggleState:'On'}],inspected:{title:'Редактор'},coverage:{truncated:true}};
+  const view=formatObservation({events:[{phase:'observe',observation}]});
+  assert.equal(view.availableWindow.title,'Редактор');
+  assert.equal(view.truncated,true);
+  assert.match(view.coverage,/неполное/u);
+  const data=formatDataSent({calls:[{request:{...stepRequest(),state:{...stepRequest().state,observation}},decision:stepDecision}]});
+  assert.match(data.find(item=>item.label==='Наблюдение интерфейса').value,/Окон: 2; элементов: 1[\s\S]*Редактор/u);
 });
 
 test('capabilities preserve explicit availability and never invent enabled state', () => {

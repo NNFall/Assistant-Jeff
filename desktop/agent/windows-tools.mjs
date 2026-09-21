@@ -20,7 +20,7 @@ const failure=(error,{effectAttempted=false,status=effectAttempted?'execution_un
 });
 
 /** One run owns one instance. Models receive observed IDs, never native arguments. */
-export function createWindowsTools({desktop,choose=desktop?.choose??chooseWindowsAction}={}){
+export function createWindowsTools({desktop,choose=desktop?.choose??chooseWindowsAction,command='',maxCandidates=96}={}){
   if(typeof desktop?.bridge?.request!=='function')throw new TypeError('desktop.bridge.request is required');
   let current=null,catalog=new Map(),uncertain=false,busy=false,needsObservation=false;
   const observedEffects=new Set();
@@ -32,7 +32,7 @@ export function createWindowsTools({desktop,choose=desktop?.choose??chooseWindow
   };
   const cache=(snapshot,{operation,page=0}={})=>{
     const scope=windowOperations.includes(operation)?{operation}:undefined;
-    let batch=buildWindowsCandidates(snapshot,'',{page:operation==='set_keyboard_language'?0:page,...(scope?{scope}:{})});
+    let batch=buildWindowsCandidates(snapshot,command,{limit:maxCandidates,page:operation==='set_keyboard_language'?0:page,...(scope?{scope}:{})});
     if(operation==='set_keyboard_language'){
       const candidates=batch.candidates.filter(item=>item.operation===operation);
       batch={candidates,page:0,pages:1,total:candidates.length,omitted:0};
@@ -47,7 +47,7 @@ export function createWindowsTools({desktop,choose=desktop?.choose??chooseWindow
       windows:snapshot.windows.map(item=>({id:item.id,title:item.title,app:item.processName,minimized:item.minimized,maximized:item.maximized,active:item.active,
         ...(item.keyboardLanguage?{keyboardLanguage:item.keyboardLanguage,availableKeyboardLanguages:item.availableKeyboardLanguages}:{}),
       })),
-      actions:candidates.map(item=>({id:item.id,title:item.label,op:item.operation,targetId:item.targetId})),
+      actions:candidates.map(item=>({id:item.id,title:item.label,op:item.operation,targetId:item.targetId,...(item.args?{arguments:item.args}:{})})),
       observation,
       coverage:{page:batch.page,pages:batch.pages,totalActions:batch.total,omittedActions:batch.omitted,
         windowCount:snapshot.windows.length,elementCount:snapshot.elements.length,truncated:snapshot.metadata?.truncated===true,
@@ -127,7 +127,7 @@ export function createWindowsTools({desktop,choose=desktop?.choose??chooseWindow
     // A matched native Invoke receipt with a validated changed UI establishes
     // dispatch, not the user's goal. Require an explicit read before continuing;
     // never repeat that invoke simply because semantic completion is uncertain.
-    if(!verified&&candidate.operation==='invoke'&&receipt.stateChanged===true&&receipt.effectAttempted===true&&receipt.evidence==='state_changed'&&after){
+    if(!verified&&['invoke','click'].includes(candidate.operation)&&receipt.stateChanged===true&&receipt.effectAttempted===true&&receipt.evidence==='state_changed'&&after){
       observedEffects.add(JSON.stringify([candidate.targetId,candidate.operation]));needsObservation=true;invalidate();
       return {ok:true,verified:false,effectAttempted:true,effectConfirmed:true,needsObservation:true,status:'dispatched',evidence:'state_changed',
         message:'Действие передано приложению, интерфейс изменился. Нужно проверить результат.',data:{snapshotVersion:after.version,receipt,goalVerified:false}};

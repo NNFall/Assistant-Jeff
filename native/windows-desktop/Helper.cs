@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -28,6 +29,7 @@ internal sealed class DesktopError : Exception
 internal sealed class WindowIdentity
 {
     public IntPtr Handle; public int Pid; public int Session; public long Started; public string Path; public string ProcessName; public string Id; public string Title;
+    public string ClassName; public string SurfaceKind;
 }
 internal sealed class ProcessIdentityInfo
 {
@@ -36,6 +38,7 @@ internal sealed class ProcessIdentityInfo
 internal sealed class DesktopTarget
 {
     public WindowIdentity Window; public AutomationElement Element; public string[] Capabilities; public Dictionary<string, object> State; public string Runtime; public string SemanticIdentity; public string NameFingerprint; public bool IsFocusedEdit;
+    public ProcessIdentityInfo ElementProcess;
 }
 internal sealed class TextTarget
 {
@@ -48,7 +51,9 @@ internal sealed class WalkEntry
 internal sealed class TabGroupState { public int Expected; public bool Complete; }
 
 // This is a product backend. It never executes model-generated code, types
-// arbitrary keys or falls back to screen coordinates. General window
+// arbitrary keys or accepts model-supplied screen coordinates. Trusted shell
+// buttons may be clicked at a fresh UIA point after an exact element hit-test.
+// General window
 // observations do not read text/value contents; the dedicated text_* methods
 // read bounded non-secret ValuePattern values after their own UIA guards.
 internal sealed class WindowsDesktopHelper : IDisposable
@@ -80,7 +85,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
     private string textObservationVersion;
     private string textObservationWindowId;
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 4194304, RecursionLimit = 32 };
-    private static readonly Regex SensitiveWindow = new Regex(@"password|passkey|sign[ -]?in|log[ -]?in|authentication|authorization|two.factor|security|credential|парол|войти|вход в|авторизац|аутентификац|безопасност|настройки|параметры|settings|учетн|учётн", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex SensitiveWindow = new Regex(@"password|passkey|sign[ -]?in|log[ -]?in|authentication|authorization|two.factor|security|credential|парол|войти|вход в|авторизац|аутентификац|безопасност|учетн|учётн", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex SecretText = new Regex(@"apikey_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,}|Bearer\s+\S+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex BlockedTextContext = new Regex(@"(?:^\s*(?:javascript:|data:|file:)|developer\s*(?:tools?|console)|command\s*prompt|powershell|windows\s*terminal|(?:^|[ ._-])terminal(?:$|[ ._-])|cmd(?:\.exe)?|shell)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex BlockedTextPayload = new Regex(@"^\s*(?:javascript:|data:|file:)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -88,7 +93,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
         "codex", "chatgpt", "windowsterminal", "powershell", "pwsh", "cmd", "conhost", "openconsole", "mintty", "bash", "wsl", "wt",
         "credentialuibroker", "logonui", "consent", "winlogon", "lockapp", "systemsettings", "sechealthui", "securityhealthsystray", "mmc", "regedit",
         "1password", "bitwarden", "keepass", "keepassxc", "lastpass", "dashlane", "protonpass", "jeffwindowsdesktophelper", "jeffdesktoplabhelper", "assistant jeff",
-        "textinputhost", "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "nvidia overlay", "nvidia share", "gamebar", "gamebarftserver", "gamebarpresencewriter", "taskmgr"
+        "textinputhost", "shellhost", "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "nvidia overlay", "nvidia share", "gamebar", "gamebarftserver", "gamebarpresencewriter", "taskmgr"
     };
 
     private WindowsDesktopHelper(int excludedOwner, int restrictedFixture)
@@ -125,7 +130,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
     {
         if (window.Pid == ownPid || window.Pid == ownerPid) return true;
         if (IsTaskManagerPath(window.Path)) return false; // Window-level only; Observe never traverses this app.
-        if (BlockedProcesses.Contains(window.ProcessName)) return true;
+        if (BlockedProcesses.Contains(window.ProcessName) && TrustedWindowsProcess(window.ProcessName, window.Path) == null) return true;
         string path = window.Path.ToLowerInvariant(), title = window.Title;
         if (path.Contains("\\codex\\") || path.Contains("\\chatgpt\\") || path.Contains("\\1password\\") || path.Contains("\\bitwarden\\") || path.Contains("\\keepass")) return true;
         if (SensitiveWindow.IsMatch(title) || BlockedTextContext.IsMatch(title) || title.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("ChatGPT", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("Jeff Windows", StringComparison.OrdinalIgnoreCase) >= 0 || title.IndexOf("Assistant Jeff", StringComparison.OrdinalIgnoreCase) >= 0) return true;
@@ -135,6 +140,138 @@ internal sealed class WindowsDesktopHelper : IDisposable
     {
         try { return String.Equals(Path.GetFullPath(path), Path.Combine(Environment.SystemDirectory, "Taskmgr.exe"), StringComparison.OrdinalIgnoreCase); }
         catch { return false; }
+    }
+    private static string TrustedWindowsProcess(string processName, string path)
+    {
+        // Shell names are not authority: only the canonical Windows image paths
+        // may bypass the ordinary application/window filters. Copied executables
+        // and similarly named programs retain the original restrictions.
+        if (String.IsNullOrEmpty(processName) || String.IsNullOrEmpty(path)) return null;
+        string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        string relative = null, kind = null;
+        switch (processName.ToLowerInvariant())
+        {
+            case "explorer": relative = "explorer.exe"; kind = "explorer"; break;
+            case "shellhost": relative = @"System32\ShellHost.exe"; kind = "shell"; break;
+            case "shellexperiencehost": relative = @"SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe"; kind = "shell"; break;
+            case "startmenuexperiencehost": relative = @"SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe"; kind = "start"; break;
+            case "searchhost": relative = @"SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\SearchHost.exe"; kind = "search"; break;
+            case "searchapp": relative = @"SystemApps\Microsoft.Windows.Search_cw5n1h2txyewy\SearchApp.exe"; kind = "search"; break;
+            case "textinputhost": relative = @"SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\TextInputHost.exe"; kind = "input"; break;
+            case "systemsettings": relative = @"ImmersiveControlPanel\SystemSettings.exe"; kind = "settings"; break;
+            case "applicationframehost": relative = @"System32\ApplicationFrameHost.exe"; kind = "frame"; break;
+            default: return null;
+        }
+        try { return String.Equals(Path.GetFullPath(path), Path.Combine(windows, relative), StringComparison.OrdinalIgnoreCase) ? kind : null; }
+        catch { return null; }
+    }
+    private static string ClassifySurface(string processName, string path, string className, string title, bool toolWindow)
+    {
+        string trusted = TrustedWindowsProcess(processName, path);
+        bool taskbar = className == "Shell_TrayWnd" || className == "Shell_SecondaryTrayWnd";
+        bool desktop = className == "Progman" || className == "WorkerW";
+        if (taskbar || desktop) return trusted == "explorer" ? (taskbar ? "taskbar" : "desktop") : null;
+        if (trusted == "start") return "start_menu";
+        if (trusted == "search") return "search";
+        if (trusted == "shell" || trusted == "input") return "shell_popup";
+        if (trusted == "settings" || (trusted == "frame" && Regex.IsMatch(title ?? "", @"^(?:Параметры|Настройки|Settings)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))) return "settings";
+        if (trusted == "explorer" && (toolWindow || String.IsNullOrEmpty(title) || className == "NotifyIconOverflowWindow" || className == "TopLevelWindowForOverflowXamlIsland")) return "shell_popup";
+        if (toolWindow || String.IsNullOrEmpty(title)) return null;
+        return "application";
+    }
+    private static bool IsShellSurfaceKind(string kind)
+    {
+        return kind == "taskbar" || kind == "desktop" || kind == "start_menu" || kind == "search" || kind == "shell_popup";
+    }
+    private static string SurfaceTitle(string kind)
+    {
+        switch (kind)
+        {
+            case "taskbar": return "Панель задач";
+            case "desktop": return "Рабочий стол";
+            case "start_menu": return "Пуск";
+            case "search": return "Поиск Windows";
+            case "settings": return "Параметры Windows";
+            default: return "Системная панель Windows";
+        }
+    }
+    private static bool AllowedEmbeddedProcess(WindowIdentity window, ProcessIdentityInfo process)
+    {
+        if (process == null || process.Session != window.Session || process.Started <= 0) return false;
+        if (process.Pid == window.Pid) return process.Started == window.Started && String.Equals(process.Path, window.Path, StringComparison.OrdinalIgnoreCase);
+        // Windows composes shell/settings trees from several trusted hosts. Do
+        // not generalize that exception to arbitrary cross-process app content.
+        return (IsShellSurfaceKind(window.SurfaceKind) || window.SurfaceKind == "settings") &&
+            TrustedWindowsProcess(window.ProcessName, window.Path) != null && TrustedWindowsProcess(process.ProcessName, process.Path) != null;
+    }
+    private static bool SameProcessIdentity(ProcessIdentityInfo first, ProcessIdentityInfo second)
+    {
+        return first != null && second != null && first.Pid == second.Pid && first.Session == second.Session && first.Started == second.Started &&
+            String.Equals(first.Path, second.Path, StringComparison.OrdinalIgnoreCase) && String.Equals(first.ProcessName, second.ProcessName, StringComparison.OrdinalIgnoreCase);
+    }
+    private static bool IsObservedShellClickTarget(WindowIdentity window, ControlType role, string runtime)
+    {
+        return window != null && role == ControlType.Button && !String.IsNullOrEmpty(runtime) &&
+            (window.SurfaceKind == "taskbar" || window.SurfaceKind == "shell_popup" || window.SurfaceKind == "start_menu") &&
+            TrustedWindowsProcess(window.ProcessName, window.Path) != null;
+    }
+    private static bool HasClickBounds(Rectangle bounds)
+    {
+        return bounds.Width > 0 && bounds.Height > 0 && bounds.Right > bounds.Left && bounds.Bottom > bounds.Top;
+    }
+    private static bool CanInspectUiaOnlyShell(WindowIdentity window)
+    {
+        if (window == null) return false;
+        string trusted = TrustedWindowsProcess(window.ProcessName, window.Path);
+        return (trusted == "explorer" && window.SurfaceKind == "taskbar" &&
+                (window.ClassName == "Shell_TrayWnd" || window.ClassName == "Shell_SecondaryTrayWnd")) ||
+            (trusted == "shell" && window.SurfaceKind == "shell_popup" && window.ClassName == "ControlCenterWindow");
+    }
+    private static bool HasVisibleShellBounds(Rectangle bounds, Rectangle screen)
+    {
+        if (!HasClickBounds(bounds) || bounds.Width <= 1 || bounds.Height <= 1) return false;
+        var visible = Rectangle.Intersect(bounds, screen);
+        return visible.Width > 1 && visible.Height > 1;
+    }
+    private bool IsUiaShellVisible(WindowIdentity window)
+    {
+        // Windows composition can show Quick Settings, or retain the taskbar
+        // during that transition, without WS_VISIBLE on its root HWND. This
+        // exception permits inspection only; each control action still needs
+        // its own fresh identity, geometry and hit-test. Hidden 1px XAML stubs
+        // and ordinary application/tool windows do not qualify.
+        if (!CanInspectUiaOnlyShell(window) || !PhysicalCoordinatesAvailable()) return false;
+        var root = automation.FromHandle(window.Handle);
+        if (root.Properties.ProcessId.Value != window.Pid || root.Properties.NativeWindowHandle.Value != window.Handle ||
+            root.Properties.ClassName.ValueOrDefault != window.ClassName || root.IsOffscreen || RuntimeId(root).Length == 0) return false;
+        var bounds = root.BoundingRectangle;
+        return Screen.AllScreens.Any(screen => HasVisibleShellBounds(bounds, screen.Bounds));
+    }
+    private static bool PhysicalCoordinatesAvailable()
+    {
+        try { return GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) == 2; }
+        catch (EntryPointNotFoundException) { return false; }
+    }
+    private static bool ConfigureDpiAwareness()
+    {
+        // This standalone UIA client must use the same physical coordinate
+        // space for provider geometry, screen bounds, hit tests and mouse input.
+        // Set the process default before any DPI-sensitive API; the explicit
+        // STA context also handles an already configured host in native tests.
+        try
+        {
+            SetProcessDpiAwarenessContext(new IntPtr(-4)); // PER_MONITOR_AWARE_V2
+            SetThreadDpiAwarenessContext(new IntPtr(-4));
+            return PhysicalCoordinatesAvailable();
+        }
+        catch (EntryPointNotFoundException) { return false; }
+    }
+    private static bool ShouldContinueReadback(string operation, string surfaceKind, int attempt, long elapsedMs, bool verified, bool stateChanged, string evidence)
+    {
+        if (verified || stateChanged || operation == "inspect" || operation == "replace_text") return false;
+        bool shellTransition = (operation == "invoke" || operation == "click") && IsShellSurfaceKind(surfaceKind);
+        if (shellTransition) return attempt < 5 && elapsedMs < 1200;
+        return attempt < 3 && evidence != "effect_outcome_unknown";
     }
     private static string KeyboardLanguage(IntPtr layout)
     {
@@ -188,10 +325,13 @@ internal sealed class WindowsDesktopHelper : IDisposable
     }
     private WindowIdentity Identity(IntPtr handle)
     {
-        if (handle == IntPtr.Zero || !IsWindow(handle) || !IsWindowVisible(handle)) return null;
+        if (handle == IntPtr.Zero || !IsWindow(handle)) return null;
+        bool nativeVisible = IsWindowVisible(handle);
         var className = new StringBuilder(256); GetClassName(handle, className, className.Capacity);
-        if (new[] { "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd" }.Contains(className.ToString())) return null;
-        if ((GetWindowLongPtr(handle, -20).ToInt64() & 0x00000080L) != 0) return null; // WS_EX_TOOLWINDOW: overlays/palettes, not ordinary app windows.
+        // Preserve the cheap rejection of all unrelated hidden HWNDs before
+        // process/module and UIA reads in the bounded desktop inventory.
+        if (!nativeVisible && className.ToString() != "ControlCenterWindow" && className.ToString() != "Shell_TrayWnd" && className.ToString() != "Shell_SecondaryTrayWnd") return null;
+        bool toolWindow = (GetWindowLongPtr(handle, -20).ToInt64() & 0x00000080L) != 0;
         int cloaked; if (DwmGetWindowAttribute(handle, 14, out cloaked, 4) == 0 && cloaked != 0) return null;
         uint nativePid; GetWindowThreadProcessId(handle, out nativePid);
         if (nativePid == 0 || nativePid > Int32.MaxValue || (fixturePid > 0 && nativePid != fixturePid)) return null;
@@ -199,19 +339,31 @@ internal sealed class WindowsDesktopHelper : IDisposable
         {
             var process = ReadProcessIdentity((int)nativePid);
             if (process == null || process.Session != sessionId) return null;
-            string title = WindowTitle(handle); if (title.Length == 0) return null;
+            string title = WindowTitle(handle);
+            string surfaceKind = ClassifySurface(process.ProcessName, process.Path, className.ToString(), title, toolWindow);
+            if (surfaceKind == null) return null;
+            if (IsShellSurfaceKind(surfaceKind))
+            {
+                NativeRect bounds;
+                if (!GetWindowRect(handle, out bounds) || bounds.Right <= bounds.Left || bounds.Bottom <= bounds.Top) return null;
+            }
+            if (title.Length == 0) title = SurfaceTitle(surfaceKind);
             uint currentPid; GetWindowThreadProcessId(handle, out currentPid); if (currentPid != nativePid) return null;
             if (fixturePid > 0 && (process.Started != fixtureStart || !String.Equals(process.Path, fixturePath, StringComparison.OrdinalIgnoreCase))) return null;
-            var window = new WindowIdentity { Handle = handle, Pid = process.Pid, Session = process.Session, Started = process.Started, Path = process.Path, ProcessName = process.ProcessName, Title = title };
+            var window = new WindowIdentity { Handle = handle, Pid = process.Pid, Session = process.Session, Started = process.Started, Path = process.Path, ProcessName = process.ProcessName, Title = title, ClassName = className.ToString(), SurfaceKind = surfaceKind };
+            if (IsProtected(window) || (!nativeVisible && !IsUiaShellVisible(window))) return null;
+            // Recheck the native owner after UIA reads: composition HWNDs may
+            // disappear while a flyout is dismissed or recreated.
+            GetWindowThreadProcessId(handle, out currentPid); if (currentPid != nativePid || !IsWindow(handle)) return null;
             window.Id = "win_" + Hash(window.Pid + ":" + window.Started + ":" + window.Session + ":" + window.Path.ToLowerInvariant() + ":" + handle.ToInt64()).Substring(0, 24);
-            return IsProtected(window) ? null : window;
+            return window;
         }
         catch { return null; }
     }
     private WindowIdentity Revalidate(WindowIdentity previous)
     {
         var current = Identity(previous.Handle);
-        if (current == null || current.Id != previous.Id || current.Path != previous.Path || current.Started != previous.Started) throw new DesktopError("TARGET_IDENTITY_CHANGED");
+        if (current == null || current.Id != previous.Id || current.Path != previous.Path || current.Started != previous.Started || current.ClassName != previous.ClassName || current.SurfaceKind != previous.SurfaceKind) throw new DesktopError("TARGET_IDENTITY_CHANGED");
         return current;
     }
     private static Dictionary<string, object> WindowState(WindowIdentity window)
@@ -219,6 +371,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
         uint ignoredPid; uint thread = GetWindowThreadProcessId(window.Handle, out ignoredPid); var layout = GetKeyboardLayout(thread);
         var state = new Dictionary<string, object> {
             { "id", window.Id }, { "title", window.Title }, { "processName", window.ProcessName }, { "processId", window.Pid },
+            { "surfaceKind", window.SurfaceKind }, { "className", window.ClassName },
             { "minimized", IsIconic(window.Handle) }, { "maximized", IsZoomed(window.Handle) }, { "active", GetForegroundWindow() == window.Handle },
             { "keyboardLanguage", KeyboardLanguage(layout) }, { "keyboardLayoutId", "0x" + layout.ToInt64().ToString("X16") }, { "availableKeyboardLanguages", AvailableKeyboardLanguages() }
         };
@@ -226,6 +379,9 @@ internal sealed class WindowsDesktopHelper : IDisposable
     }
     private static List<string> WindowCapabilities(WindowIdentity window)
     {
+        // Closing, minimizing, focusing or changing the input layout of a shell
+        // infrastructure HWND is not an ordinary application operation.
+        if (IsShellSurfaceKind(window.SurfaceKind)) return new List<string> { "inspect" };
         var caps = new List<string> { "inspect", "activate" }; long style = GetWindowLongPtr(window.Handle, -16).ToInt64();
         if (!IsIconic(window.Handle) && (style & 0x00020000L) != 0) caps.Add("minimize");
         if (!IsZoomed(window.Handle) && (style & 0x00010000L) != 0) caps.Add("maximize");
@@ -234,14 +390,63 @@ internal sealed class WindowsDesktopHelper : IDisposable
         if (GetForegroundWindow() == window.Handle && !IsTaskManagerPath(window.Path) && AvailableKeyboardLanguages().Length > 0) caps.Add("set_keyboard_language");
         return caps;
     }
+    private static bool IsObservedShellRoot(WindowIdentity window, int processId, IntPtr handle, string className)
+    {
+        return window != null && handle != IntPtr.Zero && window.Handle == handle && window.Pid == processId &&
+            window.ClassName == className && IsShellSurfaceKind(window.SurfaceKind) &&
+            TrustedWindowsProcess(window.ProcessName, window.Path) != null;
+    }
+    private void AddUiaShellWindows(List<WindowIdentity> windows, Stopwatch watch, List<Dictionary<string, object>> errors, ref bool truncated)
+    {
+        if (fixturePid > 0) return; // Fixture observations never inspect the real desktop UIA tree.
+        // Modern composition surfaces (including the primary taskbar while a
+        // flyout is open) can be missing from EnumWindows altogether. Supplement
+        // only direct UIA desktop children owned by canonical Windows hosts.
+        // They retain the exact native HWND/process identity and shell guards.
+        var handles = new HashSet<IntPtr>(windows.Select(window => window.Handle));
+        var processes = new Dictionary<int, ProcessIdentityInfo>();
+        try
+        {
+            var walker = automation.TreeWalkerFactory.GetRawViewWalker();
+            var child = walker.GetFirstChild(automation.GetDesktop()); int roots = 0;
+            while (child != null)
+            {
+                if (roots++ >= MaxWindows * 2 || watch.ElapsedMilliseconds >= ObserveBudgetMs || windows.Count >= MaxWindows) { truncated = true; break; }
+                try
+                {
+                    IntPtr handle = child.Properties.NativeWindowHandle.ValueOrDefault;
+                    if (handle != IntPtr.Zero && !handles.Contains(handle))
+                    {
+                        int pid = child.Properties.ProcessId.Value;
+                        ProcessIdentityInfo process;
+                        if (!processes.TryGetValue(pid, out process)) { process = ReadProcessIdentity(pid); processes[pid] = process; }
+                        if (process != null && process.Session == sessionId && TrustedWindowsProcess(process.ProcessName, process.Path) != null)
+                        {
+                            var window = Identity(handle);
+                            if (IsObservedShellRoot(window, pid, handle, child.Properties.ClassName.ValueOrDefault))
+                            {
+                                windows.Add(window); handles.Add(handle);
+                            }
+                        }
+                    }
+                }
+                catch (Exception error) { ProviderError(errors, "shell_inventory_element", error); truncated = true; }
+                child = walker.GetNextSibling(child);
+            }
+        }
+        catch (Exception error) { ProviderError(errors, "shell_inventory", error); truncated = true; }
+    }
     private Dictionary<string, object> Observe(string requestedWindow, bool explicitlyRequested)
     {
         var watch = Stopwatch.StartNew(); var windows = new List<WindowIdentity>(); bool truncated = false;
+        var providerErrors = new List<Dictionary<string, object>>();
         EnumWindows(delegate(IntPtr handle, IntPtr ignored) {
             var window = Identity(handle);
             if (window != null) { if (windows.Count >= MaxWindows) { truncated = true; return false; } windows.Add(window); }
             return true;
         }, IntPtr.Zero);
+        AddUiaShellWindows(windows, watch, providerErrors, ref truncated);
+        bool inventoryTruncated = truncated;
         windows = windows.OrderBy(x => x.Id, StringComparer.Ordinal).ToList();
         if (explicitlyRequested)
         {
@@ -256,11 +461,12 @@ internal sealed class WindowsDesktopHelper : IDisposable
             var element = new Dictionary<string, object> {
                 { "id", window.Id }, { "label", Text(window.ProcessName + ": " + window.Title, 500) }, { "name", window.Title }, { "role", "Window" }, { "capabilities", caps },
                 { "windowId", window.Id }, { "processName", window.ProcessName }, { "processId", window.Pid }, { "minimized", state["minimized"] }, { "maximized", state["maximized"] }, { "active", state["active"] }, { "stateVersion", state["stateVersion"] },
+                { "surfaceKind", window.SurfaceKind }, { "className", window.ClassName },
                 { "keyboardLanguage", state["keyboardLanguage"] }, { "keyboardLayoutId", state["keyboardLayoutId"] }, { "availableKeyboardLanguages", state["availableKeyboardLanguages"] }
             };
             elements.Add(element); next[window.Id] = new DesktopTarget { Window = window, Capabilities = caps, State = element };
         }
-        int scanned = 0, skippedCrossProcess = 0; string surfaceStatus = "not_inspected"; var providerErrors = new List<Dictionary<string, object>>();
+        int scanned = 0, skippedCrossProcess = 0; string surfaceStatus = "not_inspected";
         var selectedWindow = windows.FirstOrDefault(x => x.Id == selectedWindowId);
         if (selectedWindow != null)
         {
@@ -281,7 +487,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
         observed = next;
         return new Dictionary<string, object> {
             { "version", Hash(semantic) }, { "app", "Windows" }, { "summary", Text(summary.ToString(), 4000) }, { "elements", elements }, { "windows", inventory }, { "facts", facts },
-            { "metadata", new Dictionary<string, object> { { "provider", "FlaUI.UIA3 5.0.0" }, { "monitorCount", Screen.AllScreens.Length }, { "truncated", truncated }, { "scannedElements", scanned }, { "fixtureRestricted", fixturePid > 0 }, { "surfaceStatus", surfaceStatus }, { "providerErrors", providerErrors }, { "skippedCrossProcess", skippedCrossProcess }, { "tabOrderPartial", elements.Any(x => (string)x["role"] == "TabItem" && Boolean(x, "visualOrderIsPartial")) } } }
+            { "metadata", new Dictionary<string, object> { { "provider", "FlaUI.UIA3 5.0.0" }, { "monitorCount", Screen.AllScreens.Length }, { "coordinateSpace", PhysicalCoordinatesAvailable() ? "physical" : "unavailable_for_click" }, { "truncated", truncated }, { "inventoryTruncated", inventoryTruncated }, { "scannedElements", scanned }, { "fixtureRestricted", fixturePid > 0 }, { "surfaceStatus", surfaceStatus }, { "providerErrors", providerErrors }, { "skippedCrossProcess", skippedCrossProcess }, { "tabOrderPartial", elements.Any(x => (string)x["role"] == "TabItem" && Boolean(x, "visualOrderIsPartial")) } } }
         };
     }
     private Dictionary<string, object> ObserveText(string windowId)
@@ -395,8 +601,15 @@ internal sealed class WindowsDesktopHelper : IDisposable
     {
         Revalidate(window); var root = automation.FromHandle(window.Handle);
         if (root.Properties.ProcessId.Value != window.Pid) throw new DesktopError("TARGET_IDENTITY_CHANGED");
-        var walker = automation.TreeWalkerFactory.GetControlViewWalker(); var queue = new List<WalkEntry>();
+        // The trusted Control Center composition root may be absent from the
+        // Control view even while its Raw view contains the visible buttons.
+        // Existing role/password/process guards also apply to this bounded walk.
+        var walker = CanInspectUiaOnlyShell(window) && window.ClassName == "ControlCenterWindow"
+            ? automation.TreeWalkerFactory.GetRawViewWalker() : automation.TreeWalkerFactory.GetControlViewWalker();
+        var queue = new List<WalkEntry>();
         var tabGroups = new Dictionary<string, TabGroupState>();
+        var processes = new Dictionary<int, ProcessIdentityInfo>();
+        processes[window.Pid] = new ProcessIdentityInfo { Pid = window.Pid, Session = window.Session, Started = window.Started, Path = window.Path, ProcessName = window.ProcessName };
         queue.Add(new WalkEntry { Element = root, Depth = 0, ParentKey = window.Id, Group = window.Title, Priority = 0, Sequence = 0 });
         int uiCount = 0, sequence = 0;
         while (queue.Count > 0)
@@ -407,12 +620,20 @@ internal sealed class WindowsDesktopHelper : IDisposable
             var role = ControlType.Window; string name = window.Title, key = window.Id;
             if (entry.Depth > 0)
             {
+                ProcessIdentityInfo elementProcess = null;
                 try
                 {
-                    if (element.Properties.ProcessId.Value != window.Pid) { skippedCrossProcess++; continue; }
+                    int elementPid = element.Properties.ProcessId.Value;
+                    if (!processes.TryGetValue(elementPid, out elementProcess))
+                    {
+                        elementProcess = ReadProcessIdentity(elementPid);
+                        if (AllowedEmbeddedProcess(window, elementProcess)) processes[elementPid] = elementProcess;
+                    }
+                    if (!AllowedEmbeddedProcess(window, elementProcess)) { skippedCrossProcess++; continue; }
                     role = entry.KnownRole.HasValue ? entry.KnownRole.Value : element.ControlType;
                     if (role == ControlType.Edit)
                     {
+                        if (elementPid != window.Pid) { skippedCrossProcess++; continue; }
                         int inputErrors = errors.Count;
                         ObserveFocusedEdit(window, element, next, elements, errors, ref uiCount);
                         if (errors.Count > inputErrors) truncated = true;
@@ -427,7 +648,9 @@ internal sealed class WindowsDesktopHelper : IDisposable
                 string rawName = role == ControlType.Document ? "" : Optional(() => element.Name, "", "name", errors), runtime = RuntimeId(element);
                 name = Text(rawName, 500);
                 if (SensitiveWindow.IsMatch(name)) continue;
-                string identity = role.ToString() + ":" + Text(Optional(() => element.Properties.AutomationId.ValueOrDefault, "", "automation_id", errors), 200);
+                string automationId = Text(Optional(() => element.Properties.AutomationId.ValueOrDefault, "", "automation_id", errors), 200);
+                string className = Text(Optional(() => element.Properties.ClassName.ValueOrDefault, "", "class_name", errors), 200);
+                string identity = role.ToString() + ":" + automationId;
                 key = runtime.Length > 0 ? runtime : entry.ParentKey + ":" + identity + ":" + name + ":" + entry.Order;
                 bool enabled = Optional(() => element.IsEnabled, false, "enabled", errors), offscreen = Optional(() => element.IsOffscreen, true, "offscreen", errors);
                 bool? selected = null; string toggled = null, expanded = null;
@@ -448,20 +671,31 @@ internal sealed class WindowsDesktopHelper : IDisposable
                     if (enabled && !offscreen && expanded != null && expanded != "LeafNode") caps.Add(expanded == "Expanded" ? "collapse" : "expand");
                 }
                 if (enabled && !offscreen && Optional(() => element.Patterns.Invoke.IsSupported, false, "invoke_supported", errors)) caps.Add("invoke");
+                if (enabled && !offscreen && PhysicalCoordinatesAvailable() && IsObservedShellClickTarget(window, role, runtime) &&
+                    Optional(() => HasClickBounds(element.BoundingRectangle), false, "click_bounds", errors))
+                {
+                    // Some Windows shell buttons advertise Invoke but do not
+                    // open their UI through it. Offer one observed action, not
+                    // competing click/invoke/toggle routes for the same button.
+                    caps.Clear(); caps.Add("click");
+                }
                 if (role != ControlType.Document && name.Length > 0 && (caps.Count > 0 || selected.HasValue || toggled != null || expanded != null))
                 {
-                    string id = "el_" + Hash(window.Id + ":" + key).Substring(0, 24);
+                    string processBinding = elementProcess.Pid + ":" + elementProcess.Started + ":" + elementProcess.Path.ToLowerInvariant();
+                    string id = "el_" + Hash(window.Id + ":" + processBinding + ":" + key).Substring(0, 24);
                     if (!next.ContainsKey(id))
                     {
                         object bounds = Optional<object>(() => { var rectangle = element.BoundingRectangle; return new Dictionary<string, object> { { "x", rectangle.Left }, { "y", rectangle.Top }, { "width", rectangle.Width }, { "height", rectangle.Height } }; }, null, "bounds", errors);
                         var state = new Dictionary<string, object> {
                             { "id", id }, { "windowId", window.Id }, { "label", Text((entry.Group.Length > 0 ? entry.Group + " / " : "") + name, 500) }, { "name", name }, { "role", role.ToString() },
+                            { "automationId", automationId }, { "className", className },
+                            { "processId", elementProcess.Pid }, { "processName", elementProcess.ProcessName },
                             { "capabilities", caps.ToArray() }, { "selected", selected }, { "toggleState", toggled }, { "expandState", expanded }, { "enabled", enabled }, { "offscreen", offscreen },
                             { "group", Text(entry.Group, 500) }, { "order", null },
                             { "tabGroupId", role == ControlType.TabItem ? "tabgrp_" + Hash(window.Id + ":" + entry.ParentKey).Substring(0, 24) : null },
                             { "bounds", bounds }
                         };
-                        elements.Add(state); next[id] = new DesktopTarget { Window = window, Element = element, Capabilities = caps.ToArray(), State = state, Runtime = runtime, SemanticIdentity = identity, NameFingerprint = Hash(rawName ?? "") }; uiCount++;
+                        elements.Add(state); next[id] = new DesktopTarget { Window = window, Element = element, Capabilities = caps.ToArray(), State = state, Runtime = runtime, SemanticIdentity = identity, NameFingerprint = Hash(rawName ?? ""), ElementProcess = elementProcess }; uiCount++;
                     }
                 }
                 if (errors.Count > errorsBefore) truncated = true;
@@ -703,13 +937,44 @@ internal sealed class WindowsDesktopHelper : IDisposable
     }
     private static string InvokeEvidence(Dictionary<string, object> before, Dictionary<string, object> after, string windowId)
     {
+        // Taskbar/Start invokes commonly create a separate hosted HWND without
+        // changing the source subtree. A newly observed trusted surface is UI
+        // change evidence only, never proof that the user's goal was achieved.
+        if (NewShellSurfaceObserved(before, after, windowId)) return "state_changed";
         if (!CompleteSurface(before, windowId) || !CompleteSurface(after, windowId)) return "effect_outcome_unknown";
         return SurfaceState(before, windowId) != SurfaceState(after, windowId) ? "state_changed" : "invoked_without_observable_change";
+    }
+    private static bool NewShellSurfaceObserved(Dictionary<string, object> before, Dictionary<string, object> after, string windowId)
+    {
+        if (before == null || after == null) return false;
+        object previousRaw, currentRaw, previousMetadataRaw, currentMetadataRaw, previousFactsRaw;
+        if (!before.TryGetValue("windows", out previousRaw) || !after.TryGetValue("windows", out currentRaw) ||
+            !before.TryGetValue("metadata", out previousMetadataRaw) || !after.TryGetValue("metadata", out currentMetadataRaw) || !before.TryGetValue("facts", out previousFactsRaw)) return false;
+        var previous = previousRaw as List<Dictionary<string, object>>; var current = currentRaw as List<Dictionary<string, object>>;
+        var previousMetadata = previousMetadataRaw as Dictionary<string, object>; var currentMetadata = currentMetadataRaw as Dictionary<string, object>;
+        var previousFacts = previousFactsRaw as Dictionary<string, object>;
+        if (previous == null || current == null || previousMetadata == null || currentMetadata == null ||
+            previousFacts == null || Field(previousFacts, "selectedWindowId") != windowId || Field(previousFacts, "surfaceStatus") != "available" ||
+            !previousMetadata.ContainsKey("inventoryTruncated") || !(previousMetadata["inventoryTruncated"] is bool) || Boolean(previousMetadata, "inventoryTruncated") ||
+            !currentMetadata.ContainsKey("inventoryTruncated") || !(currentMetadata["inventoryTruncated"] is bool) || Boolean(currentMetadata, "inventoryTruncated")) return false;
+        var source = previous.FirstOrDefault(x => Field(x, "id") == windowId);
+        if (source == null || (!IsShellSurfaceKind(Field(source, "surfaceKind")) && Field(source, "surfaceKind") != "settings")) return false;
+        // The inventories are independently complete. Optional source-control
+        // provider failures need not hide the appearance of another real HWND.
+        var previousIds = new HashSet<string>(previous.Select(x => Field(x, "id")), StringComparer.Ordinal);
+        return current.Any(x => !previousIds.Contains(Field(x, "id")) &&
+            (Field(x, "surfaceKind") == "shell_popup" || Field(x, "surfaceKind") == "start_menu" || Field(x, "surfaceKind") == "search" || Field(x, "surfaceKind") == "settings"));
     }
     private static void ValidateCurrentElement(DesktopTarget target)
     {
         var element = target.Element; var prior = target.State;
-        if (element.Properties.ProcessId.Value != target.Window.Pid || element.Properties.IsPassword.ValueOrDefault || !element.IsEnabled || element.IsOffscreen) throw new DesktopError("ELEMENT_NO_LONGER_AVAILABLE");
+        int elementPid = element.Properties.ProcessId.Value;
+        if (elementPid != (target.ElementProcess == null ? target.Window.Pid : target.ElementProcess.Pid) || element.Properties.IsPassword.ValueOrDefault || !element.IsEnabled || element.IsOffscreen) throw new DesktopError("ELEMENT_NO_LONGER_AVAILABLE");
+        if (target.ElementProcess != null)
+        {
+            var currentProcess = ReadProcessIdentity(elementPid);
+            if (!SameProcessIdentity(target.ElementProcess, currentProcess) || !AllowedEmbeddedProcess(target.Window, currentProcess)) throw new DesktopError("ELEMENT_IDENTITY_CHANGED");
+        }
         string name = element.Name ?? "", currentIdentity = element.ControlType.ToString() + ":" + Text(element.Properties.AutomationId.ValueOrDefault, 200);
         string selected = element.Patterns.SelectionItem.IsSupported ? element.Patterns.SelectionItem.Pattern.IsSelected.Value.ToString() : null;
         string toggled = element.Patterns.Toggle.IsSupported ? element.Patterns.Toggle.Pattern.ToggleState.Value.ToString() : null;
@@ -717,6 +982,37 @@ internal sealed class WindowsDesktopHelper : IDisposable
         if (currentIdentity != target.SemanticIdentity || Text(name, 500) != Field(prior, "name") || Hash(name) != target.NameFingerprint ||
             selected != Field(prior, "selected") || toggled != Field(prior, "toggleState") || expanded != Field(prior, "expandState") ||
             (target.Runtime.Length > 0 && RuntimeId(element) != target.Runtime)) throw new DesktopError("ELEMENT_IDENTITY_CHANGED");
+    }
+    private bool ClickHitMatchesTarget(DesktopTarget target, Point point)
+    {
+        var hit = automation.FromPoint(point); var walker = automation.TreeWalkerFactory.GetRawViewWalker();
+        int expectedPid = target.ElementProcess == null ? target.Window.Pid : target.ElementProcess.Pid;
+        var watch = Stopwatch.StartNew();
+        for (int depth = 0; hit != null && depth <= MaxDepth && watch.ElapsedMilliseconds < 1000; depth++)
+        {
+            // A glyph nested inside the same button is acceptable. An overlay,
+            // a sibling, or a different process is not the observed target.
+            if (hit.Properties.ProcessId.Value != expectedPid || hit.Properties.IsPassword.ValueOrDefault) return false;
+            if (RuntimeId(hit) == target.Runtime) return true;
+            hit = walker.GetParent(hit);
+        }
+        return false;
+    }
+    private Point ResolveObservedClickPoint(DesktopTarget target)
+    {
+        if (!PhysicalCoordinatesAvailable()) throw new DesktopError("CLICK_DPI_CONTEXT_UNAVAILABLE", false);
+        if (target.Element == null || !IsObservedShellClickTarget(target.Window, target.Element.ControlType, target.Runtime)) throw new DesktopError("CLICK_TARGET_DENIED", false);
+        Revalidate(target.Window); ValidateCurrentElement(target);
+        var bounds = target.Element.BoundingRectangle;
+        if (!HasClickBounds(bounds)) throw new DesktopError("CLICK_POINT_UNAVAILABLE", false);
+        Point point;
+        if (!target.Element.TryGetClickablePoint(out point)) point = new Point(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
+        if (!bounds.Contains(point) || !Screen.AllScreens.Any(screen => screen.Bounds.Contains(point))) throw new DesktopError("CLICK_POINT_UNAVAILABLE", false);
+        // Recheck after acquiring the point, then hit-test immediately before
+        // dispatch. No focus, mouse movement or input occurs in these checks.
+        Revalidate(target.Window); ValidateCurrentElement(target);
+        if (!target.Element.BoundingRectangle.Contains(point) || !ClickHitMatchesTarget(target, point)) throw new DesktopError("CLICK_TARGET_OBSCURED", false);
+        return point;
     }
     private static bool OriginalWindowAbsent(WindowIdentity window)
     {
@@ -747,7 +1043,9 @@ internal sealed class WindowsDesktopHelper : IDisposable
     private object Execute(Dictionary<string, object> args)
     {
         string expected = Required(args, "expectedVersion"), targetId = Required(args, "targetId"), operation = Required(args, "operation");
+        if (operation == "click" && args.Keys.Any(key => key != "expectedVersion" && key != "targetId" && key != "operation" && key != "expectedWindowVersion")) throw new DesktopError("INVALID_ARGUMENT", false);
         string expectedWindow = args.ContainsKey("expectedWindowVersion") ? Required(args, "expectedWindowVersion") : null;
+        Point? clickPoint = null;
         string replacement = operation == "replace_text" ? ReplacementText(args) : null;
         string keyboardLanguage = operation == "set_keyboard_language" ? Required(args, "language") : null;
         if (keyboardLanguage != null && keyboardLanguage != "English" && keyboardLanguage != "Russian") throw new DesktopError("INVALID_KEYBOARD_LANGUAGE");
@@ -784,6 +1082,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
             {
                 if (operation == "replace_text") ValidateFocusedEdit(target);
                 else ValidateCurrentElement(target);
+                if (operation == "click") clickPoint = ResolveObservedClickPoint(target);
             }
             catch (DesktopError) { throw; }
             catch (Exception error) { throw new DesktopError("UIA_REQUEST_FAILED", "validate_element", error, false); }
@@ -793,6 +1092,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
                     if (operation == "replace_text") target.Element.Patterns.Value.Pattern.SetValue(replacement);
                     else if (operation == "select") target.Element.Patterns.SelectionItem.Pattern.Select();
                     else if (operation == "invoke") target.Element.Patterns.Invoke.Pattern.Invoke();
+                    else if (operation == "click") FlaUI.Core.Input.Mouse.LeftClick(clickPoint.Value);
                     else if (operation == "toggle") target.Element.Patterns.Toggle.Pattern.Toggle();
                     else if (operation == "expand") target.Element.Patterns.ExpandCollapse.Pattern.Expand();
                     else if (operation == "collapse") target.Element.Patterns.ExpandCollapse.Pattern.Collapse();
@@ -803,11 +1103,16 @@ internal sealed class WindowsDesktopHelper : IDisposable
             catch (Exception error) { throw new DesktopError("UIA_REQUEST_FAILED", "apply_" + operation, error, true); }
         }
         Dictionary<string, object> after = null; bool verified = false, stateChanged = false; string evidence = "not_verified";
-        for (int attempt = 0; attempt < 4; attempt++)
+        var readbackWatch = Stopwatch.StartNew(); int readbackAttempts = 0;
+        bool shellTransition = (operation == "invoke" || operation == "click") && IsShellSurfaceKind(window.SurfaceKind);
+        for (int attempt = 0; attempt < (shellTransition ? 6 : 4); attempt++)
         {
-            if (operation != "inspect") Thread.Sleep(attempt == 0 ? 120 : 160);
+            if (attempt > 0 && shellTransition && readbackWatch.ElapsedMilliseconds >= 1200) break;
+            if (operation != "inspect") Thread.Sleep(attempt == 0 ? 120 : shellTransition ? (int)Math.Min(180, Math.Max(0, 1200 - readbackWatch.ElapsedMilliseconds)) : 160);
+            if (attempt > 0 && shellTransition && readbackWatch.ElapsedMilliseconds >= 1200) break;
+            readbackAttempts++;
             try { after = Observe(null, false); }
-            catch { return new { operation = operation, targetId = targetId, before = before, after = (object)null, verified = false, stateChanged = false, effectAttempted = effectAttempted, evidence = "effect_outcome_unknown", textLength = replacement == null ? (int?)null : replacement.Length }; }
+            catch { return new { operation = operation, targetId = targetId, before = before, after = (object)null, verified = false, stateChanged = false, effectAttempted = effectAttempted, evidence = "effect_outcome_unknown", textLength = replacement == null ? (int?)null : replacement.Length, readbackAttempts = readbackAttempts, readbackElapsedMs = readbackWatch.ElapsedMilliseconds, clickPoint = clickPoint.HasValue ? new { x = clickPoint.Value.X, y = clickPoint.Value.Y, source = "fresh_uia", hitTestVerified = true } : null }; }
             var result = FindElement(after, targetId);
             if (operation == "inspect") { verified = selectedWindowId == window.Id; evidence = verified ? "window_inspected" : "not_verified"; }
             else if (operation == "close")
@@ -827,14 +1132,16 @@ internal sealed class WindowsDesktopHelper : IDisposable
             else if (operation == "select") { verified = Boolean(result, "selected"); evidence = verified ? "element_selected" : "not_verified"; }
             else if (operation == "toggle") { verified = result != null && Field(result, "toggleState") != Field(prior, "toggleState"); evidence = verified ? "toggle_state_changed" : "not_verified"; }
             else if (operation == "expand" || operation == "collapse") { verified = Field(result, "expandState") == (operation == "expand" ? "Expanded" : "Collapsed"); evidence = verified ? "expansion_state_changed" : "not_verified"; }
-            else if (operation == "invoke") { evidence = InvokeEvidence(before, after, window.Id); stateChanged = evidence == "state_changed"; }
-            if (verified || stateChanged || evidence == "effect_outcome_unknown" || operation == "inspect" || operation == "replace_text") break;
+            else if (operation == "invoke" || operation == "click") { evidence = InvokeEvidence(before, after, window.Id); stateChanged = evidence == "state_changed"; }
+            // Only passive observations repeat. The input dispatch above is
+            // outside this loop and is never repeated after an unknown effect.
+            if (!ShouldContinueReadback(operation, window.SurfaceKind, attempt, readbackWatch.ElapsedMilliseconds, verified, stateChanged, evidence)) break;
         }
-        return new { operation = operation, targetId = targetId, before = before, after = after, verified = verified, stateChanged = stateChanged, effectAttempted = effectAttempted, evidence = evidence, textLength = replacement == null ? (int?)null : replacement.Length };
+        return new { operation = operation, targetId = targetId, before = before, after = after, verified = verified, stateChanged = stateChanged, effectAttempted = effectAttempted, evidence = evidence, textLength = replacement == null ? (int?)null : replacement.Length, readbackAttempts = readbackAttempts, readbackElapsedMs = readbackWatch.ElapsedMilliseconds, clickPoint = clickPoint.HasValue ? new { x = clickPoint.Value.X, y = clickPoint.Value.Y, source = "fresh_uia", hitTestVerified = true } : null };
     }
     private object Dispatch(string method, Dictionary<string, object> args)
     {
-        if (method == "volume_get" || method == "volume_set")
+        if (method == "volume_get" || method == "volume_set" || method == "audio_outputs_get")
         {
             if (fixturePid > 0) throw new DesktopError("SYSTEM_VOLUME_UNAVAILABLE_IN_FIXTURE");
             return SystemVolume.Execute(method, args);
@@ -860,6 +1167,7 @@ internal sealed class WindowsDesktopHelper : IDisposable
     public void Dispose() { if (desktopAutomation != null) desktopAutomation.Dispose(); }
     [STAThread] private static int Main(string[] args)
     {
+        ConfigureDpiAwareness();
         Console.InputEncoding = new UTF8Encoding(false); Console.OutputEncoding = new UTF8Encoding(false);
         try
         {
@@ -901,6 +1209,11 @@ internal sealed class WindowsDesktopHelper : IDisposable
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsDelegate callback, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr handle);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] private static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")] private static extern int GetAwarenessFromDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr handle, out NativeRect bounds);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr handle);
     [DllImport("user32.dll")] private static extern bool IsZoomed(IntPtr handle);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
